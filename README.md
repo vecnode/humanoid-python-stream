@@ -109,31 +109,50 @@ The runtime behaves like a continuous AI DSP loop: prompts are streamed in, tran
 
 ```mermaid
 flowchart LR
-        P[Prompt Stream
-        initial prompt + continuous new prompts]
+        P([Prompt Stream<br/>text intent · continuous])
 
         subgraph C[CLoSD AI Core]
                 direction TB
-                E[Text Encoder
-                distilbert-base-uncased]
-                D[DiP Diffusion Planner
-                predicts future pose trajectory]
-                R[CLoSD RL Policy
-                tracking controller]
-                X[Physics Step
-                Isaac Gym humanoid dynamics]
+
+                E[Text Encoder]
+                Em["distilbert-base-uncased"]:::model
+
+                D[DiP Diffusion Planner<br/>10 DDIM steps · 20 ctx → 40 pred frames]
+                Dm["model000200000.pt"]:::model
+
+                R[CLoSD RL Policy<br/>AMP-based tracking controller]
+                Rm["Humanoid.pth"]:::model
+
+                X[Physics Simulation<br/>Isaac Gym · joint torques · collisions]
+                Xm["SMPL_NEUTRAL.pkl"]:::model
+
+                E -.->|weights| Em
+                D -.->|weights| Dm
+                R -.->|weights| Rm
+                X -.->|body model| Xm
+        end
+
+        subgraph V[Voice Synthesis]
+                direction TB
+                VV[Real-time TTS<br/>pose + phase → speech]
+                VVm["microsoft/VibeVoice-Realtime-0.5B"]:::model
+                AU([Audio Out<br/>streamed PCM])
+                VV -.->|weights| VVm
         end
 
         subgraph A[PilotLight App]
                 direction TB
-                B[Bridge
-                state + debug channels]
-                G[Graphics Renderer
-                skeleton + scene updates]
+                B[IPC Bridge<br/>shared-memory · debug channels]
+                G[Graphics Renderer<br/>skeleton mesh · scene overlays]
         end
 
-        P --> E --> D --> R --> X --> B --> G
-        G -- user sees result, issues next prompt --> P
-        X -- current state feedback --> D
+        P --> E --> D --> R --> X
+        X --> B --> G
+        X -- pose + phase context --> VV --> AU
+        X -. state feedback .-> D
+        G -- user observes · next prompt --> P
+
+        classDef model fill:#f4f4f4,stroke:#bbb,color:#555,font-size:11px
+        classDef default rx:6
 ```
 
