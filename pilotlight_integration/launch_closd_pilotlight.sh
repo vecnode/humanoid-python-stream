@@ -37,11 +37,15 @@ fi
 
 "${SCRIPT_DIR}/sync_closd_overlay.sh"
 
-VIEWER_BIN="${SCRIPT_DIR}/pilotlight_vendor/out/pilot_light"
+VIEWER_DIR="${SCRIPT_DIR}/pilotlight_vendor/out"
+VIEWER_BIN="${VIEWER_DIR}/pilot_light"
 VIEWER_PID=""
 
 if [[ -x "${VIEWER_BIN}" ]]; then
-  "${VIEWER_BIN}" > /tmp/pilotlight_viewer.log 2>&1 &
+  (
+    cd "${VIEWER_DIR}"
+    LD_LIBRARY_PATH="${VIEWER_DIR}:${LD_LIBRARY_PATH:-}" ./pilot_light
+  ) > /tmp/pilotlight_viewer.log 2>&1 &
   VIEWER_PID=$!
   echo "viewer started pid=${VIEWER_PID} log=/tmp/pilotlight_viewer.log"
 else
