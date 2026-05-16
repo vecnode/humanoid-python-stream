@@ -4,7 +4,8 @@ Under heavy development
 
 ## Build viewer (once)
 ```bash
-cd pilotlight_integration/pilotlight_app && ./build_bridge_viewer.sh
+cd pilotlight_integration/pilotlight_app
+./build_bridge_viewer.sh
 ```
 
 ## Launch
@@ -98,3 +99,40 @@ The launcher runs pilotlight_integration/sync_closd_overlay.sh before starting C
 | CLoSD RL policy | [Humanoid.pth](CLoSD/output/CLoSD/CLoSD_t2m_finetune/Humanoid.pth) | AMP-based physics RL controller that drives the humanoid to track DiP predictions |
 | SMPL body model | [SMPL_NEUTRAL.pkl](CLoSD/closd/diffusion_planner/body_models/smpl/SMPL_NEUTRAL.pkl) | Body shape / joint regression used by both systems |
 | BERT text encoder | `distilbert-base-uncased` via HuggingFace cache (`~/.cache/huggingface/`) | Encodes the text prompt into an embedding that conditions DiP |
+
+
+
+## AI DSP
+
+The runtime behaves like a continuous AI DSP loop: prompts are streamed in, transformed into motion plans, stabilized by physics control, and rendered by the PilotLight viewer while new prompts keep updating intent.
+
+```mermaid
+flowchart LR
+        P[Prompt Stream
+        initial prompt + continuous new prompts]
+
+        subgraph C[CLoSD AI Core]
+                direction TB
+                E[Text Encoder
+                distilbert-base-uncased]
+                D[DiP Diffusion Planner
+                predicts future pose trajectory]
+                R[CLoSD RL Policy
+                tracking controller]
+                X[Physics Step
+                Isaac Gym humanoid dynamics]
+        end
+
+        subgraph A[PilotLight App]
+                direction TB
+                B[Bridge
+                state + debug channels]
+                G[Graphics Renderer
+                skeleton + scene updates]
+        end
+
+        P --> E --> D --> R --> X --> B --> G
+        G -- user sees result, issues next prompt --> P
+        X -- current state feedback --> D
+```
+
