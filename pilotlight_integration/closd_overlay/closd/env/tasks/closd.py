@@ -160,6 +160,9 @@ class CLoSD(humanoid_im.HumanoidIm):
         self.spawn_anchor_xy = torch.zeros((self.num_envs, 2), dtype=torch.float32, device=self.device)
         self.spawn_anchor_valid = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self.last_finished_root = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+
+        # Blend first frames of each newly generated horizon with current live pose to avoid pops.
+        self.transition_blend_frames = int(self.cfg['env']['dip'].get('transition_blend_frames', 8))
         
     def init_save_hml_episodes(self):
         save_motions = self.cfg['env'].get('save_motion', {})
@@ -308,7 +311,8 @@ class CLoSD(humanoid_im.HumanoidIm):
         model_kwargs['y']['text'] = self.get_text_prompts()
         # Cache text embeddings to avoid repeated BERT work in the viewer thread.
         text_prompts = tuple(model_kwargs['y']['text'])
-        text_prompts_changed = (not hasattr(self, '_cached_text_prompts')) or (self._cached_text_prompts != text_prompts)
+        prev_text_prompts = getattr(self, '_cached_text_prompts', None)
+        text_prompts_changed = (prev_text_prompts is None) or (prev_text_prompts != text_prompts)
         if text_prompts_changed:
             self._cached_text_prompts = text_prompts
             self._cached_text_embed = self.mdm.encode_text(model_kwargs['y']['text'])
@@ -357,6 +361,36 @@ class CLoSD(humanoid_im.HumanoidIm):
         # Extract the planning horizon
         context_len_30fps = model_kwargs['y']['prefix_len'] * 30 // 20
         planning_horizon = sample_xyz[:, context_len_30fps-1:context_len_30fps+self.planning_horizon_30fps]  # [x, -z, y]
+
+        blend_frames = max(0, min(self.transition_blend_frames, planning_horizon.shape[1]))
+        prompt_changed_mask = None
+        if prev_text_prompts is not None:
+            if len(prev_text_prompts) == len(text_prompts):
+                prompt_changed_mask = torch.tensor(
+                    [prev_text_prompts[i] != text_prompts[i] for i in range(len(text_prompts))],
+                    dtype=torch.bool,
+                    device=planning_horizon.device,
+                )
+            elif text_prompts_changed:
+                prompt_changed_mask = torch.ones(
+                    (planning_horizon.shape[0],),
+                    dtype=torch.bool,
+                    device=planning_horizon.device,
+                )
+
+        if blend_frames > 0 and prompt_changed_mask is not None and torch.any(prompt_changed_mask):
+            # planning_horizon is in SMPL joint order; map live rigid-body pose to SMPL before blending.
+            live_pose = self._rigid_body_pos[prompt_changed_mask][:, mujoco_2_smpl].detach()
+            blend_alpha = torch.linspace(
+                0.0,
+                1.0,
+                steps=blend_frames + 1,
+                device=planning_horizon.device,
+                dtype=planning_horizon.dtype)[1:].view(1, blend_frames, 1, 1)
+            planning_horizon[prompt_changed_mask, :blend_frames] = (
+                (1.0 - blend_alpha) * live_pose[:, None] +
+                blend_alpha * planning_horizon[prompt_changed_mask, :blend_frames]
+            )
 
         return planning_horizon[:, 0], planning_horizon[:, 1:]
     

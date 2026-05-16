@@ -95,7 +95,6 @@ typedef struct _plAppData
     bool bHasFrame;
     bool bAutoFollow;
     bool bFollowLastSpawn;
-    bool bShowSpawnMarkers;
 
     // orbit camera
     plVec3 tOrbitTarget;
@@ -120,6 +119,24 @@ const plWindowI*   gptWindows = NULL;
 const plGraphicsI* gptGfx     = NULL;
 const plDrawI*     gptDraw    = NULL;
 const plStarterI*  gptStarter = NULL;
+
+// Shared HUD palette values for quick tweaking and consistency.
+static const plVec3 gtUiColorToggleOn  = {0.20f, 0.45f, 0.20f};
+static const plVec3 gtUiColorToggleOff = {0.25f, 0.25f, 0.25f};
+
+static inline uint32_t
+pl__ui_color_rgb_alpha(plVec3 tRgb, float fAlpha)
+{
+    return PL_COLOR_32_RGBA(tRgb.x, tRgb.y, tRgb.z, fAlpha);
+}
+
+static inline uint32_t
+pl__ui_color_toggle_bg(bool bEnabled, bool bHover)
+{
+    if(bEnabled)
+        return pl__ui_color_rgb_alpha(gtUiColorToggleOn, bHover ? 0.95f : 0.85f);
+    return pl__ui_color_rgb_alpha(gtUiColorToggleOff, bHover ? 0.85f : 0.75f);
+}
 
 static inline float
 pl__wrap_angle(float tTheta)
@@ -198,6 +215,72 @@ pl__camera_orbit_from_angles(plCamera* ptCamera, plVec3 tTarget, float fDist)
     ptCamera->tPos.y = tTarget.y - fFy * fDist;
     ptCamera->tPos.z = tTarget.z - fFz * fDist;
     pl__camera_update(ptCamera);
+}
+
+static bool
+pl__project_world_to_screen(const plCamera* ptCamera, plVec2 tViewport, plVec3 tWorld, plVec2* ptOut)
+{
+    if(!ptCamera || !ptOut || tViewport.x <= 0.0f || tViewport.y <= 0.0f)
+        return false;
+
+    const plMat4 tMVP = pl_mul_mat4((plMat4*)&ptCamera->tProjMat, (plMat4*)&ptCamera->tViewMat);
+    const float fX = tWorld.x;
+    const float fY = tWorld.y;
+    const float fZ = tWorld.z;
+
+    const float fClipX = tMVP.col[0].x * fX + tMVP.col[1].x * fY + tMVP.col[2].x * fZ + tMVP.col[3].x;
+    const float fClipY = tMVP.col[0].y * fX + tMVP.col[1].y * fY + tMVP.col[2].y * fZ + tMVP.col[3].y;
+    const float fClipZ = tMVP.col[0].z * fX + tMVP.col[1].z * fY + tMVP.col[2].z * fZ + tMVP.col[3].z;
+    const float fClipW = tMVP.col[0].w * fX + tMVP.col[1].w * fY + tMVP.col[2].w * fZ + tMVP.col[3].w;
+
+    if(fabsf(fClipW) < 1e-5f)
+        return false;
+
+    const float fInvW = 1.0f / fClipW;
+    const float fNdcX = fClipX * fInvW;
+    const float fNdcY = fClipY * fInvW;
+    const float fNdcZ = fClipZ * fInvW;
+
+    if(fNdcZ < 0.0f || fNdcZ > 1.0f)
+        return false;
+
+    ptOut->x = (fNdcX * 0.5f + 0.5f) * tViewport.x;
+    ptOut->y = (fNdcY * 0.5f + 0.5f) * tViewport.y;
+    return true;
+}
+
+static bool
+pl__measure_pixels_for_meter(const plAppData* ptAppData, plVec2 tViewport, float fGroundZ, float* pfOutPixels)
+{
+    if(!ptAppData || !pfOutPixels)
+        return false;
+
+    const float fMeter = 1.0f;
+    const plVec3 tP0 = {
+        ptAppData->tOrbitTarget.x - 0.5f * fMeter,
+        ptAppData->tOrbitTarget.y,
+        fGroundZ + 0.02f,
+    };
+    const plVec3 tP1 = {
+        ptAppData->tOrbitTarget.x + 0.5f * fMeter,
+        ptAppData->tOrbitTarget.y,
+        fGroundZ + 0.02f,
+    };
+
+    plVec2 tS0 = {0.0f, 0.0f};
+    plVec2 tS1 = {0.0f, 0.0f};
+    if(!pl__project_world_to_screen(&ptAppData->tCamera, tViewport, tP0, &tS0) ||
+       !pl__project_world_to_screen(&ptAppData->tCamera, tViewport, tP1, &tS1))
+        return false;
+
+    const float fDx = tS1.x - tS0.x;
+    const float fDy = tS1.y - tS0.y;
+    const float fPixels = sqrtf(fDx * fDx + fDy * fDy);
+    if(fPixels < 1e-3f)
+        return false;
+
+    *pfOutPixels = fPixels;
+    return true;
 }
 static bool
 pl__open_bridge_socket(plAppData* ptAppData)
@@ -569,14 +652,6 @@ pl__process_hud_buttons(plAppData* ptAppData)
         ptAppData->bHudWantsMouse = true;
     if(bResetHover && gptIO->is_mouse_clicked(PL_MOUSE_BUTTON_LEFT, false))
         pl__send_reset_episode(ptAppData);
-
-    const plVec2 tShowMin = {358.0f, 304.0f};
-    const plVec2 tShowMax = {438.0f, 328.0f};
-    const bool bShowHover = gptIO->is_mouse_hovering_rect(tShowMin, tShowMax);
-    if(bShowHover)
-        ptAppData->bHudWantsMouse = true;
-    if(bShowHover && gptIO->is_mouse_clicked(PL_MOUSE_BUTTON_LEFT, false))
-        ptAppData->bShowSpawnMarkers = !ptAppData->bShowSpawnMarkers;
 }
 
 static void
@@ -642,7 +717,7 @@ pl__draw_hud(plAppData* ptAppData, float fGroundZ)
     gptDraw->add_rect_filled(
         ptAppData->ptHudLayer,
         (plVec2){12.0f, 66.0f},
-        (plVec2){544.0f, 340.0f},
+        (plVec2){460.0f, 340.0f},
         (plDrawSolidOptions){.uColor = PL_COLOR_32_RGBA(0.04f, 0.04f, 0.04f, 0.78f)});
 
     gptDraw->add_text(
@@ -687,9 +762,34 @@ pl__draw_hud(plAppData* ptAppData, float fGroundZ)
     gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 236.0f},
         "RED: Root/center marker",
         (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 0.3f, 0.2f, 1.0f), .fSize = 12.0f});
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 252.0f},
-        "SPAWN: magenta=anchor, white=center",
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 0.75f, 1.0f, 1.0f), .fSize = 12.0f});
+
+    // Live metric ruler: shows how large 1 meter appears with current camera setup.
+    plIO* ptIO = gptIO->get_io();
+    const plVec2 tViewport = {ptIO->tMainViewportSize.x, ptIO->tMainViewportSize.y};
+    float fPixelsPerMeter = 0.0f;
+    if(pl__measure_pixels_for_meter(ptAppData, tViewport, fGroundZ, &fPixelsPerMeter))
+    {
+        const float fBarPx = pl_clampf(24.0f, fPixelsPerMeter, 180.0f);
+        const plVec2 tA = {568.0f, 86.0f};
+        const plVec2 tB = {568.0f + fBarPx, 86.0f};
+        const plDrawLineOptions tScaleLine = {
+            .uColor = PL_COLOR_32_RGBA(0.95f, 0.95f, 0.95f, 1.0f),
+            .fThickness = 1.6f,
+        };
+        gptDraw->add_line(ptAppData->ptHudLayer, tA, tB, tScaleLine);
+        gptDraw->add_line(ptAppData->ptHudLayer, (plVec2){tA.x, tA.y - 5.0f}, (plVec2){tA.x, tA.y + 5.0f}, tScaleLine);
+        gptDraw->add_line(ptAppData->ptHudLayer, (plVec2){tB.x, tB.y - 5.0f}, (plVec2){tB.x, tB.y + 5.0f}, tScaleLine);
+
+        char acScale[128] = {0};
+        snprintf(acScale, sizeof(acScale), "scale |__| = 1.00 m (%.0f px)", fPixelsPerMeter);
+        gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){568.0f, 94.0f}, acScale,
+            (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(0.90f, 0.95f, 1.0f, 1.0f), .fSize = 12.0f});
+    }
+    else
+    {
+        gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){568.0f, 94.0f}, "scale |__| = 1.00 m (off-screen)",
+            (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(0.70f, 0.75f, 0.80f, 1.0f), .fSize = 12.0f});
+    }
 
     const float fButtonX = 20.0f;
     const float fButtonY = 260.0f;
@@ -712,9 +812,7 @@ pl__draw_hud(plAppData* ptAppData, float fGroundZ)
         const plVec2 tMax = {fX0 + fButtonW, fButtonY + fButtonH};
         const bool bHover = gptIO->is_mouse_hovering_rect(tMin, tMax);
         const plDrawSolidOptions tBg = {
-            .uColor = abEnabled[i]
-                ? PL_COLOR_32_RGBA(0.20f, 0.45f, 0.20f, bHover ? 0.95f : 0.85f)
-                : PL_COLOR_32_RGBA(0.25f, 0.25f, 0.25f, bHover ? 0.85f : 0.75f)
+            .uColor = pl__ui_color_toggle_bg(abEnabled[i], bHover)
         };
         gptDraw->add_rect_filled(ptAppData->ptHudLayer, tMin, tMax, tBg);
 
@@ -761,18 +859,6 @@ pl__draw_hud(plAppData* ptAppData, float fGroundZ)
         (plDrawSolidOptions){.uColor = PL_COLOR_32_RGBA(0.35f, 0.26f, 0.20f, 0.90f)});
     gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){268.0f, 310.0f}, "RESET NOW",
         (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 0.95f, 0.9f, 1.0f), .fSize = 11.0f});
-
-    const plVec2 tShowMin = {358.0f, 304.0f};
-    const plVec2 tShowMax = {438.0f, 328.0f};
-    gptDraw->add_rect_filled(
-        ptAppData->ptHudLayer,
-        tShowMin,
-        tShowMax,
-        (plDrawSolidOptions){.uColor = ptAppData->bShowSpawnMarkers
-            ? PL_COLOR_32_RGBA(0.20f, 0.40f, 0.45f, 0.90f)
-            : PL_COLOR_32_RGBA(0.28f, 0.28f, 0.28f, 0.85f)});
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){366.0f, 310.0f}, "SPAWN",
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 11.0f});
 }
 
 static void
@@ -796,7 +882,7 @@ pl__draw_bridge_frame(plAppData* ptAppData)
         for(uint32_t i = 0; i < ptFrame->uBodyCount; i++)
         {
             plSphere tSphere = {
-                .fRadius = 0.08f,
+                .fRadius = 0.04f,
                 .tCenter = ptFrame->atBodyPos[i]
             };
             gptDraw->add_3d_sphere_filled(ptAppData->pt3dDrawlist, tSphere, 0, 0,
@@ -924,12 +1010,11 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
         ptAppData->tCamera.fPitch = -0.45f;
         ptAppData->tCamera.fRoll = 0.0f;
         ptAppData->bShowYellow = true;
-        ptAppData->bShowBlue = true;
-        ptAppData->bShowGreen = true;
+        ptAppData->bShowBlue = false;
+        ptAppData->bShowGreen = false;
         ptAppData->bShowRed = true;
-        ptAppData->bShowSpawnMarkers = true;
         ptAppData->bHudWantsMouse = false;
-        ptAppData->bFollowLastSpawn = false;
+        ptAppData->bFollowLastSpawn = true;
         pl__camera_orbit_from_angles(&ptAppData->tCamera, ptAppData->tOrbitTarget, ptAppData->fOrbitDist);
         return ptAppData;
     }
@@ -942,12 +1027,11 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
     ptAppData->fOrbitDist   = 8.0f;
     ptAppData->bCameraInitializedFromFrame = false;
     ptAppData->bShowYellow = true;
-    ptAppData->bShowBlue = true;
-    ptAppData->bShowGreen = true;
+    ptAppData->bShowBlue = false;
+    ptAppData->bShowGreen = false;
     ptAppData->bShowRed = true;
-    ptAppData->bShowSpawnMarkers = true;
     ptAppData->bHudWantsMouse = false;
-    ptAppData->bFollowLastSpawn = false;
+    ptAppData->bFollowLastSpawn = true;
 
     const plExtensionRegistryI* ptExtensionRegistry = pl_get_api_latest(ptApiRegistry, plExtensionRegistryI);
     ptExtensionRegistry->load("pl_unity_ext", NULL, NULL, true);
@@ -1139,8 +1223,6 @@ pl_app_update(plAppData* ptAppData)
     }
     pl__camera_orbit_from_angles(&ptAppData->tCamera, ptAppData->tOrbitTarget, ptAppData->fOrbitDist);
 
-    const plMat4 tOrigin = pl_identity_mat4();
-    gptDraw->add_3d_transform(ptAppData->pt3dDrawlist, &tOrigin, 2.0f, (plDrawLineOptions){.fThickness = 0.08f});
     pl__draw_ground_grid(ptAppData, tGridCenter, fGroundZ);
 
 
@@ -1148,88 +1230,10 @@ pl_app_update(plAppData* ptAppData)
     if(ptAppData->bShowRed)
     {
         gptDraw->add_3d_sphere_filled(ptAppData->pt3dDrawlist,
-            (plSphere){.fRadius = 0.125f, .tCenter = tRootMarker},
+            (plSphere){.fRadius = 0.0625f, .tCenter = tRootMarker},
             0,
             0,
             (plDrawSolidOptions){.uColor = PL_COLOR_32_RGBA(1.0f, 0.3f, 0.2f, 1.0f)});
-    }
-
-    if(ptAppData->bShowSpawnMarkers && ptAppData->bHasFrame)
-    {
-        if(ptAppData->tFrame.bHasWorldCenter)
-        {
-            const plVec3 tC = ptAppData->tFrame.tWorldCenter;
-            const float fLen = 0.20f;
-            const float fZ = tC.z + 0.01f;
-            const plDrawLineOptions tCenterLine = {
-                .uColor = PL_COLOR_32_RGBA(1.0f, 0.7f, 1.0f, 1.0f),
-                .fThickness = 1.2f,
-            };
-            gptDraw->add_3d_line(
-                ptAppData->pt3dDrawlist,
-                (plVec3){tC.x - fLen, tC.y, fZ},
-                (plVec3){tC.x + fLen, tC.y, fZ},
-                tCenterLine);
-            gptDraw->add_3d_line(
-                ptAppData->pt3dDrawlist,
-                (plVec3){tC.x, tC.y - fLen, fZ},
-                (plVec3){tC.x, tC.y + fLen, fZ},
-                tCenterLine);
-        }
-
-        if(ptAppData->tFrame.bHasSpawnAnchor)
-        {
-            const plVec3 tA = ptAppData->tFrame.tSpawnAnchor;
-            const float fLen = 0.22f;
-            const float fZ = tA.z + 0.01f;
-            const plDrawLineOptions tAnchorLine = {
-                .uColor = PL_COLOR_32_RGBA(1.0f, 0.35f, 1.0f, 1.0f),
-                .fThickness = 1.2f,
-            };
-            // Draw a small ground-plane cross instead of a filled marker.
-            gptDraw->add_3d_line(
-                ptAppData->pt3dDrawlist,
-                (plVec3){tA.x - fLen, tA.y, fZ},
-                (plVec3){tA.x + fLen, tA.y, fZ},
-                tAnchorLine);
-            gptDraw->add_3d_line(
-                ptAppData->pt3dDrawlist,
-                (plVec3){tA.x, tA.y - fLen, fZ},
-                (plVec3){tA.x, tA.y + fLen, fZ},
-                tAnchorLine);
-        }
-
-        if(ptAppData->tFrame.bHasSpawnAnchor && ptAppData->tFrame.bHasWorldCenter)
-        {
-            const plVec3 tC = ptAppData->tFrame.tWorldCenter;
-            const plVec3 tA = ptAppData->tFrame.tSpawnAnchor;
-            plVec3 tDir = {
-                tA.x - tC.x,
-                tA.y - tC.y,
-                tA.z - tC.z,
-            };
-            const float fLen = pl_length_vec3(tDir);
-            if(fLen > 1e-5f)
-            {
-                tDir = pl_mul_vec3_scalarf(tDir, 1.0f / fLen);
-                const float fStub = pl_minf(0.7f, fLen * 0.35f);
-                const plDrawLineOptions tLinkLine = {
-                    .uColor = PL_COLOR_32_RGBA(1.0f, 0.7f, 1.0f, 1.0f),
-                    .fThickness = 1.0f,
-                };
-                // Draw short connector stubs near each marker instead of one long segment.
-                gptDraw->add_3d_line(
-                    ptAppData->pt3dDrawlist,
-                    tC,
-                    (plVec3){tC.x + tDir.x * fStub, tC.y + tDir.y * fStub, tC.z + tDir.z * fStub},
-                    tLinkLine);
-                gptDraw->add_3d_line(
-                    ptAppData->pt3dDrawlist,
-                    tA,
-                    (plVec3){tA.x - tDir.x * fStub, tA.y - tDir.y * fStub, tA.z - tDir.z * fStub},
-                    tLinkLine);
-            }
-        }
     }
 
     pl__draw_bridge_frame(ptAppData);

@@ -2,20 +2,21 @@
 
 Under heavy development
 
-## Build viewer (once)
+
+## Launch
+
 ```bash
+# Build viewer (once)
 cd pilotlight_integration/pilotlight_app
 ./build_bridge_viewer.sh
 ```
 
-## Launch
 ```bash
 conda activate closd
 cd pilotlight_integration
 ./launch_closd_pilotlight.sh
 # optional: --build-viewer  --debug-hml  --keep-viewer
 ```
-
 
 ## From scratch
 
