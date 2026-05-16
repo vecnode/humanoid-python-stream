@@ -29,3 +29,20 @@ pilotlight_integration/pilotlight_vendor/
 # External repositories (managed outside this root repo)
 CLoSD/
 isaacgym/
+
+# Generated artifacts from local runs
+output/
+save/
+mdm_debug/
+
+# Runtime logs created by launcher/viewer
+pilotlight_integration/*.log
+pilotlight_integration/*.pid
+
+# Build/generated artifacts inside pilotlight_app
+pilotlight_integration/pilotlight_app/build/
+pilotlight_integration/pilotlight_app/dist/
+
+# Temporary/debug files
+*.bak
+*.orig
