@@ -1,0 +1,31 @@
+# Python bytecode and tooling caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+
+# Generic logs and temp files
+*.log
+*.tmp
+*.swp
+*~
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# PilotLight vendor repository (external dependency)
+pilotlight_integration/pilotlight_vendor/
+
+# External repositories (managed outside this root repo)
+CLoSD/
+isaacgym/
