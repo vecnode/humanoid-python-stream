@@ -7,6 +7,7 @@ ISAACGYM_BINDINGS_DIR="${ROOT_DIR}/isaacgym/python/isaacgym/_bindings/linux-x86_
 
 BUILD_VIEWER=0
 KEEP_VIEWER=0
+DEBUG_HML=0
 CLOSD_ARGS=()
 
 while (($#)); do
@@ -17,6 +18,10 @@ while (($#)); do
       ;;
     --keep-viewer)
       KEEP_VIEWER=1
+      shift
+      ;;
+    --debug-hml)
+      DEBUG_HML=1
       shift
       ;;
     *)
@@ -60,8 +65,36 @@ if [[ -f "${ROOT_DIR}/CLoSD/closd/run.py" ]]; then
     export LD_LIBRARY_PATH="${ISAACGYM_BINDINGS_DIR}:${LD_LIBRARY_PATH:-}"
   fi
 
+  # Use the known-good runtime defaults for this integration.
+  DEFAULT_ARGS=(
+    "learning=im_big"
+    "robot=smpl_humanoid"
+    "epoch=-1"
+    "test=True"
+    "no_virtual_display=True"
+    "headless=False"
+    "env.num_envs=1"
+    "env=closd_t2m"
+    "exp_name=CLoSD_t2m_finetune"
+    "env.dip.debug_hml=False"
+    "env.dip.save_debug_mp4=False"
+    "env.dip.planning_horizon_multiplyer=4"
+    "env.viewer.backend=pilotlight"
+    "env.viewer.bridge_enabled=True"
+    "env.viewer.bridge_host=127.0.0.1"
+    "env.viewer.bridge_port=45678"
+    "env.viewer.bridge_env_idx=0"
+    "env.viewer.bridge_publish_every_n_steps=1"
+    "env.viewer.bridge_include_rot=True"
+    "env.viewer.bridge_include_predicted=True"
+  )
+
+  if [[ ${DEBUG_HML} -eq 1 ]]; then
+    DEFAULT_ARGS+=("env.dip.debug_hml=True")
+  fi
+
   cd "${ROOT_DIR}/CLoSD"
-  python closd/run.py "${CLOSD_ARGS[@]}"
+  python closd/run.py "${DEFAULT_ARGS[@]}" "${CLOSD_ARGS[@]}"
 else
   echo "missing CLoSD entrypoint: ${ROOT_DIR}/CLoSD/closd/run.py"
   exit 1
