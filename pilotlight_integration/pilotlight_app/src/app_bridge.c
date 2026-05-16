@@ -541,7 +541,6 @@ pl__poll_bridge_socket(plAppData* ptAppData)
         {
             ptAppData->tFrame = tFrame;
             ptAppData->bHasFrame = true;
-            ptAppData->bFollowLastSpawn = tFrame.bSpawnFollowLast;
             ptAppData->uPacketsParsed++;
 
             if(ptAppData->uPacketsParsed <= 3 || (ptAppData->uPacketsParsed % 120ull) == 0ull)
