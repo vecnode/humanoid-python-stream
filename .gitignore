@@ -46,3 +46,5 @@ pilotlight_integration/pilotlight_app/dist/
 # Temporary/debug files
 *.bak
 *.orig
+
+out-temp/

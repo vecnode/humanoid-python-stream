@@ -154,6 +154,12 @@ class CLoSD(humanoid_im.HumanoidIm):
                                          init_humanoid_root_pose=self._rigid_body_pos[:, 0],
                                          time_prints=self.time_prints,
                                          )
+
+        # Runtime spawn control for PilotLight integration.
+        self.spawn_follow_last = False
+        self.spawn_anchor_xy = torch.zeros((self.num_envs, 2), dtype=torch.float32, device=self.device)
+        self.spawn_anchor_valid = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        self.last_finished_root = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         
     def init_save_hml_episodes(self):
         save_motions = self.cfg['env'].get('save_motion', {})
@@ -446,11 +452,71 @@ class CLoSD(humanoid_im.HumanoidIm):
             self.planning_horizon[env_ids] = planning_horizon[env_ids, -self.planning_horizon_30fps:]  # [n_envs, horizon_len, 24, 3]
     
     def _reset_envs(self, env_ids):
+        if len(env_ids) > 0:
+            self.last_finished_root[env_ids] = self._rigid_body_pos[env_ids, 0].detach().clone()
+            if self.spawn_follow_last:
+                self.spawn_anchor_xy[env_ids] = self.last_finished_root[env_ids, :2]
+                self.spawn_anchor_valid[env_ids] = True
+
         if self.frame_idx == 0:
             self._reset_pose_buffer(env_ids)
         super()._reset_envs(env_ids)
         self._reset_pose_buffer(env_ids)
         return
+
+    def _reset_ref_state_init(self, env_ids):
+        self._motion_start_times_offset[env_ids] = 0
+
+        if self.spawn_follow_last:
+            self._global_offset[env_ids] = 0
+            self._global_offset[env_ids, 0] = self.spawn_anchor_xy[env_ids, 0]
+            self._global_offset[env_ids, 1] = self.spawn_anchor_xy[env_ids, 1]
+        else:
+            self._global_offset[env_ids] = 0
+
+        self._cycle_counter[env_ids] = 0
+        super(humanoid_im.HumanoidIm, self)._reset_ref_state_init(env_ids)
+
+        if self.obs_v == 4:
+            self.obs_buf[env_ids] = 0
+        if self.zero_out_far and self.zero_out_far_train:
+            env_ids_pick = env_ids[torch.arange(env_ids.shape[0]).long()]
+            max_distance = 5
+            rand_distance = torch.sqrt(torch.rand(env_ids_pick.shape[0]).to(self.device)) * max_distance
+            rand_angle = torch.rand(env_ids_pick.shape[0]).to(self.device) * np.pi * 2
+
+            self._global_offset[env_ids_pick, 0] = torch.cos(rand_angle) * rand_distance
+            self._global_offset[env_ids_pick, 1] = torch.sin(rand_angle) * rand_distance
+            self._cycle_counter[env_ids_pick] = self._zero_out_far_steps
+
+        return
+
+    def _handle_pilotlight_command(self, cmd):
+        action = str(cmd.get('action', '')).strip()
+        if action == 'set_spawn_mode':
+            self.spawn_follow_last = bool(cmd.get('follow_last', False))
+            print(f"[pilotlight] spawn_follow_last={self.spawn_follow_last}")
+        elif action == 'capture_spawn_anchor':
+            env_id = int(cmd.get('env_id', 0))
+            env_id = int(np.clip(env_id, 0, self.num_envs - 1))
+            self.spawn_anchor_xy[env_id] = self._rigid_body_pos[env_id, 0, :2].detach()
+            self.spawn_anchor_valid[env_id] = True
+            print(f"[pilotlight] captured spawn anchor env={env_id} xy={self.spawn_anchor_xy[env_id].tolist()}")
+        elif action == 'reset_episode':
+            self.reset()
+
+    def get_pilotlight_overlay_state(self, env_id):
+        env_id = int(np.clip(env_id, 0, self.num_envs - 1))
+        ground_z = 0.0
+        if self._rigid_body_pos.shape[1] > 0:
+            ground_z = float(self._rigid_body_pos[env_id, :, 2].min().item())
+
+        anchor_xy = self.spawn_anchor_xy[env_id]
+        return {
+            'spawn_follow_last': bool(self.spawn_follow_last),
+            'spawn_anchor': [float(anchor_xy[0].item()), float(anchor_xy[1].item()), ground_z],
+            'world_center': [0.0, 0.0, ground_z],
+        }
     
     def post_physics_step(self):
         super().post_physics_step()

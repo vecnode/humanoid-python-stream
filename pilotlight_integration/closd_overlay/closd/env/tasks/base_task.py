@@ -50,6 +50,7 @@ from closd.utils.viewer_bridge import BridgeConfig, PilotLightStatePublisher, bu
 from collections import defaultdict
 import aiohttp, cv2, asyncio
 import json
+import socket
 from collections import deque
 import threading
 
@@ -69,6 +70,10 @@ class BaseTask():
         self._bridge_include_rot = bool(viewer_cfg.get("bridge_include_rot", True))
         self._bridge_include_predicted = bool(viewer_cfg.get("bridge_include_predicted", True))
         self._bridge_last_published_step = -1
+        self._bridge_control_enabled = bool(viewer_cfg.get("bridge_control_enabled", self._bridge_enabled))
+        self._bridge_control_host = str(viewer_cfg.get("bridge_control_host", "127.0.0.1"))
+        self._bridge_control_port = int(viewer_cfg.get("bridge_control_port", 45679))
+        self._bridge_control_sock = None
 
         bridge_cfg = BridgeConfig(
             host=viewer_cfg.get("bridge_host", "127.0.0.1"),
@@ -76,6 +81,7 @@ class BaseTask():
             enabled=(self.viewer_backend == "pilotlight" and self._bridge_enabled),
         )
         self._pilotlight_publisher = PilotLightStatePublisher(bridge_cfg)
+        self._init_pilotlight_control_socket()
 
         self.headless = cfg["headless"]
         if self.headless == False and self.viewer_backend == "isaac" and not flags.no_virtual_display:
@@ -498,6 +504,8 @@ class BaseTask():
         if self.device != 'cpu':
             self.gym.fetch_results(self.sim, True)
 
+        self._poll_pilotlight_control()
+
         if not self._bridge_enabled:
             return
 
@@ -541,8 +549,56 @@ class BaseTask():
             debug_segments=debug_segments,
             text_prompt=text_prompt,
         )
+
+        if hasattr(self, "get_pilotlight_overlay_state"):
+            extra_state = self.get_pilotlight_overlay_state(env_id)
+            if isinstance(extra_state, dict):
+                payload.update(extra_state)
+
         self._pilotlight_publisher.publish(payload)
         self._bridge_last_published_step = sim_frame
+
+    def _init_pilotlight_control_socket(self):
+        if not self._bridge_control_enabled:
+            return
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setblocking(False)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self._bridge_control_host, self._bridge_control_port))
+            self._bridge_control_sock = sock
+            print(f"[pilotlight] control listening udp://{self._bridge_control_host}:{self._bridge_control_port}")
+        except OSError as exc:
+            self._bridge_control_sock = None
+            print(f"[pilotlight] control socket disabled: {exc}")
+
+    def _poll_pilotlight_control(self):
+        if self._bridge_control_sock is None:
+            return
+
+        while True:
+            try:
+                data, _ = self._bridge_control_sock.recvfrom(8192)
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+
+            if not data:
+                continue
+
+            try:
+                cmd = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+
+            if isinstance(cmd, dict):
+                self._handle_pilotlight_command(cmd)
+
+    def _handle_pilotlight_command(self, cmd):
+        # Hook for task classes (for example CLoSD) to react to PilotLight UI commands.
+        return
 
     def get_actor_params_info(self, dr_params, env):
         """Returns a flat array of actor params, their names and ranges."""

@@ -26,6 +26,8 @@
 
 #define BRIDGE_HOST "127.0.0.1"
 #define BRIDGE_PORT 45678
+#define BRIDGE_CONTROL_HOST "127.0.0.1"
+#define BRIDGE_CONTROL_PORT 45679
 #define BRIDGE_BUFFER_SIZE 65535
 #define MAX_BODIES 256
 #define MAX_PRED_POINTS 256
@@ -70,6 +72,12 @@ typedef struct _BridgeFrame
     plVec3   atDebugSegStart[MAX_DEBUG_SEGMENTS];
     plVec3   atDebugSegEnd[MAX_DEBUG_SEGMENTS];
 
+    bool     bHasSpawnAnchor;
+    plVec3   tSpawnAnchor;
+    bool     bHasWorldCenter;
+    plVec3   tWorldCenter;
+    bool     bSpawnFollowLast;
+
     char acPrompt[MAX_PROMPT_CHARS];
 } BridgeFrame;
 
@@ -82,8 +90,12 @@ typedef struct _plAppData
     plCamera tCamera;
 
     int iSocketFd;
+    int iControlSocketFd;
+    struct sockaddr_in tControlAddr;
     bool bHasFrame;
     bool bAutoFollow;
+    bool bFollowLastSpawn;
+    bool bShowSpawnMarkers;
 
     // orbit camera
     plVec3 tOrbitTarget;
@@ -227,6 +239,100 @@ pl__close_bridge_socket(plAppData* ptAppData)
     }
 }
 
+static bool
+pl__open_control_socket(plAppData* ptAppData)
+{
+    ptAppData->iControlSocketFd = socket(AF_INET, SOCK_DGRAM, 0);
+    if(ptAppData->iControlSocketFd < 0)
+        return false;
+
+    memset(&ptAppData->tControlAddr, 0, sizeof(ptAppData->tControlAddr));
+    ptAppData->tControlAddr.sin_family = AF_INET;
+    ptAppData->tControlAddr.sin_port = htons(BRIDGE_CONTROL_PORT);
+    ptAppData->tControlAddr.sin_addr.s_addr = inet_addr(BRIDGE_CONTROL_HOST);
+    return true;
+}
+
+static void
+pl__close_control_socket(plAppData* ptAppData)
+{
+    if(ptAppData->iControlSocketFd >= 0)
+    {
+        close(ptAppData->iControlSocketFd);
+        ptAppData->iControlSocketFd = -1;
+    }
+}
+
+static void
+pl__send_control_json(plAppData* ptAppData, const char* pcJson)
+{
+    if(!ptAppData || ptAppData->iControlSocketFd < 0 || !pcJson)
+        return;
+
+    sendto(
+        ptAppData->iControlSocketFd,
+        pcJson,
+        strlen(pcJson),
+        0,
+        (const struct sockaddr*)&ptAppData->tControlAddr,
+        sizeof(ptAppData->tControlAddr));
+}
+
+static void
+pl__send_spawn_mode(plAppData* ptAppData)
+{
+    char acPayload[128] = {0};
+    snprintf(
+        acPayload,
+        sizeof(acPayload),
+        "{\"action\":\"set_spawn_mode\",\"follow_last\":%s}",
+        ptAppData->bFollowLastSpawn ? "true" : "false");
+    pl__send_control_json(ptAppData, acPayload);
+}
+
+static void
+pl__send_capture_spawn_anchor(plAppData* ptAppData)
+{
+    const int iEnv = ptAppData->bHasFrame ? ptAppData->tFrame.iEnvId : 0;
+    char acPayload[128] = {0};
+    snprintf(
+        acPayload,
+        sizeof(acPayload),
+        "{\"action\":\"capture_spawn_anchor\",\"env_id\":%d}",
+        iEnv);
+    pl__send_control_json(ptAppData, acPayload);
+}
+
+static void
+pl__send_reset_episode(plAppData* ptAppData)
+{
+    pl__send_control_json(ptAppData, "{\"action\":\"reset_episode\"}");
+}
+
+static void
+pl__parse_optional_vec3_member(plJsonObject* ptRoot, const char* pcName, plVec3* ptOut, bool* pbHas)
+{
+    if(pbHas)
+        *pbHas = false;
+    if(!ptRoot || !pcName || !ptOut)
+        return;
+
+    uint32_t uUnused = 0;
+    plJsonObject* ptArr = pl_json_array_member(ptRoot, pcName, &uUnused);
+    if(!ptArr)
+        return;
+
+    float af[3] = {0.0f, 0.0f, 0.0f};
+    uint32_t uSize = 3;
+    pl_json_as_float_array(ptArr, af, &uSize);
+    if(uSize < 3)
+        return;
+
+    *ptOut = (plVec3){af[0], af[1], af[2]};
+    if(pbHas)
+        *pbHas = true;
+}
+
 static void
 pl__parse_vec3_array(plJsonObject* ptArray, plVec3* atOut, uint32_t uMaxCount, uint32_t* puOutCount)
 {
@@ -314,6 +420,12 @@ pl__parse_bridge_packet(const char* pcJson, BridgeFrame* ptFrame)
         pl__parse_debug_segments(ptSegments, &tTmp);
     }
 
+    tTmp.bHasSpawnAnchor = false;
+    tTmp.bHasWorldCenter = false;
+    tTmp.bSpawnFollowLast = pl_json_bool_member(ptRoot, "spawn_follow_last", false);
+    pl__parse_optional_vec3_member(ptRoot, "spawn_anchor", &tTmp.tSpawnAnchor, &tTmp.bHasSpawnAnchor);
+    pl__parse_optional_vec3_member(ptRoot, "world_center", &tTmp.tWorldCenter, &tTmp.bHasWorldCenter);
+
     // Optional prompt text from the sender.
     tTmp.acPrompt[0] = '\0';
     if(!pl_json_string_member(ptRoot, "text_prompt", tTmp.acPrompt, MAX_PROMPT_CHARS))
@@ -346,6 +458,7 @@ pl__poll_bridge_socket(plAppData* ptAppData)
         {
             ptAppData->tFrame = tFrame;
             ptAppData->bHasFrame = true;
+            ptAppData->bFollowLastSpawn = tFrame.bSpawnFollowLast;
             ptAppData->uPacketsParsed++;
 
             if(ptAppData->uPacketsParsed <= 3 || (ptAppData->uPacketsParsed % 120ull) == 0ull)
@@ -405,7 +518,7 @@ pl__process_hud_buttons(plAppData* ptAppData)
     ptAppData->bHudWantsMouse = false;
 
     const float fButtonX = 20.0f;
-    const float fButtonY = 252.0f;
+    const float fButtonY = 260.0f;
     const float fButtonW = 92.0f;
     const float fButtonH = 22.0f;
     const float fGap = 8.0f;
@@ -429,12 +542,47 @@ pl__process_hud_buttons(plAppData* ptAppData)
         if(bHover && gptIO->is_mouse_clicked(PL_MOUSE_BUTTON_LEFT, false))
             *apbToggles[i] = !(*apbToggles[i]);
     }
+
+    const plVec2 tFollowMin = {20.0f, 304.0f};
+    const plVec2 tFollowMax = {128.0f, 328.0f};
+    const bool bFollowHover = gptIO->is_mouse_hovering_rect(tFollowMin, tFollowMax);
+    if(bFollowHover)
+        ptAppData->bHudWantsMouse = true;
+    if(bFollowHover && gptIO->is_mouse_clicked(PL_MOUSE_BUTTON_LEFT, false))
+    {
+        ptAppData->bFollowLastSpawn = !ptAppData->bFollowLastSpawn;
+        pl__send_spawn_mode(ptAppData);
+    }
+
+    const plVec2 tCaptureMin = {136.0f, 304.0f};
+    const plVec2 tCaptureMax = {252.0f, 328.0f};
+    const bool bCaptureHover = gptIO->is_mouse_hovering_rect(tCaptureMin, tCaptureMax);
+    if(bCaptureHover)
+        ptAppData->bHudWantsMouse = true;
+    if(bCaptureHover && gptIO->is_mouse_clicked(PL_MOUSE_BUTTON_LEFT, false))
+        pl__send_capture_spawn_anchor(ptAppData);
+
+    const plVec2 tResetMin = {260.0f, 304.0f};
+    const plVec2 tResetMax = {350.0f, 328.0f};
+    const bool bResetHover = gptIO->is_mouse_hovering_rect(tResetMin, tResetMax);
+    if(bResetHover)
+        ptAppData->bHudWantsMouse = true;
+    if(bResetHover && gptIO->is_mouse_clicked(PL_MOUSE_BUTTON_LEFT, false))
+        pl__send_reset_episode(ptAppData);
+
+    const plVec2 tShowMin = {358.0f, 304.0f};
+    const plVec2 tShowMax = {438.0f, 328.0f};
+    const bool bShowHover = gptIO->is_mouse_hovering_rect(tShowMin, tShowMax);
+    if(bShowHover)
+        ptAppData->bHudWantsMouse = true;
+    if(bShowHover && gptIO->is_mouse_clicked(PL_MOUSE_BUTTON_LEFT, false))
+        ptAppData->bShowSpawnMarkers = !ptAppData->bShowSpawnMarkers;
 }
 
 static void
 pl__draw_ground_grid(plAppData* ptAppData, plVec3 tCenter, float fGroundZ)
 {
-    const int   iHalf = 12;
+    const int   iHalf = 24;
     const float fLine = 0.06f;
     const plDrawLineOptions tGrid  = {.uColor = PL_COLOR_32_RGBA(0.30f, 0.30f, 0.30f, 1.0f), .fThickness = fLine};
     const plDrawLineOptions tAxisX = {.uColor = PL_COLOR_32_RGBA(0.75f, 0.25f, 0.25f, 1.0f), .fThickness = fLine * 2.0f};
@@ -494,7 +642,7 @@ pl__draw_hud(plAppData* ptAppData, float fGroundZ)
     gptDraw->add_rect_filled(
         ptAppData->ptHudLayer,
         (plVec2){12.0f, 66.0f},
-        (plVec2){420.0f, 286.0f},
+        (plVec2){544.0f, 340.0f},
         (plDrawSolidOptions){.uColor = PL_COLOR_32_RGBA(0.04f, 0.04f, 0.04f, 0.78f)});
 
     gptDraw->add_text(
@@ -539,9 +687,12 @@ pl__draw_hud(plAppData* ptAppData, float fGroundZ)
     gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 236.0f},
         "RED: Root/center marker",
         (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 0.3f, 0.2f, 1.0f), .fSize = 12.0f});
+    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 252.0f},
+        "SPAWN: magenta=anchor, white=center",
+        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 0.75f, 1.0f, 1.0f), .fSize = 12.0f});
 
     const float fButtonX = 20.0f;
-    const float fButtonY = 252.0f;
+    const float fButtonY = 260.0f;
     const float fButtonW = 92.0f;
     const float fButtonH = 22.0f;
     const float fGap = 8.0f;
@@ -572,6 +723,56 @@ pl__draw_hud(plAppData* ptAppData, float fGroundZ)
         gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){fX0 + 6.0f, fButtonY + 5.0f}, acButton,
             (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 11.0f});
     }
+
+    const char* pcSpawnMode = ptAppData->bFollowLastSpawn ? "FOLLOW LAST END" : "CENTER";
+    char acSpawnLine[128] = {0};
+    snprintf(acSpawnLine, sizeof(acSpawnLine), "spawn mode: %s", pcSpawnMode);
+    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 288.0f}, acSpawnLine,
+        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(0.95f, 0.95f, 0.95f, 1.0f), .fSize = 12.0f});
+
+    const plVec2 tFollowMin = {20.0f, 304.0f};
+    const plVec2 tFollowMax = {128.0f, 328.0f};
+    gptDraw->add_rect_filled(
+        ptAppData->ptHudLayer,
+        tFollowMin,
+        tFollowMax,
+        (plDrawSolidOptions){.uColor = ptAppData->bFollowLastSpawn
+            ? PL_COLOR_32_RGBA(0.20f, 0.45f, 0.20f, 0.90f)
+            : PL_COLOR_32_RGBA(0.30f, 0.30f, 0.30f, 0.85f)});
+    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){28.0f, 310.0f}, "FOLLOW LAST",
+        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 11.0f});
+
+    const plVec2 tCaptureMin = {136.0f, 304.0f};
+    const plVec2 tCaptureMax = {252.0f, 328.0f};
+    gptDraw->add_rect_filled(
+        ptAppData->ptHudLayer,
+        tCaptureMin,
+        tCaptureMax,
+        (plDrawSolidOptions){.uColor = PL_COLOR_32_RGBA(0.30f, 0.30f, 0.30f, 0.85f)});
+    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){144.0f, 310.0f}, "CAPTURE",
+        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 11.0f});
+
+    const plVec2 tResetMin = {260.0f, 304.0f};
+    const plVec2 tResetMax = {350.0f, 328.0f};
+    gptDraw->add_rect_filled(
+        ptAppData->ptHudLayer,
+        tResetMin,
+        tResetMax,
+        (plDrawSolidOptions){.uColor = PL_COLOR_32_RGBA(0.35f, 0.26f, 0.20f, 0.90f)});
+    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){268.0f, 310.0f}, "RESET NOW",
+        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 0.95f, 0.9f, 1.0f), .fSize = 11.0f});
+
+    const plVec2 tShowMin = {358.0f, 304.0f};
+    const plVec2 tShowMax = {438.0f, 328.0f};
+    gptDraw->add_rect_filled(
+        ptAppData->ptHudLayer,
+        tShowMin,
+        tShowMax,
+        (plDrawSolidOptions){.uColor = ptAppData->bShowSpawnMarkers
+            ? PL_COLOR_32_RGBA(0.20f, 0.40f, 0.45f, 0.90f)
+            : PL_COLOR_32_RGBA(0.28f, 0.28f, 0.28f, 0.85f)});
+    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){366.0f, 310.0f}, "SPAWN",
+        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 11.0f});
 }
 
 static void
@@ -726,7 +927,9 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
         ptAppData->bShowBlue = true;
         ptAppData->bShowGreen = true;
         ptAppData->bShowRed = true;
+        ptAppData->bShowSpawnMarkers = true;
         ptAppData->bHudWantsMouse = false;
+        ptAppData->bFollowLastSpawn = false;
         pl__camera_orbit_from_angles(&ptAppData->tCamera, ptAppData->tOrbitTarget, ptAppData->fOrbitDist);
         return ptAppData;
     }
@@ -742,7 +945,9 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
     ptAppData->bShowBlue = true;
     ptAppData->bShowGreen = true;
     ptAppData->bShowRed = true;
+    ptAppData->bShowSpawnMarkers = true;
     ptAppData->bHudWantsMouse = false;
+    ptAppData->bFollowLastSpawn = false;
 
     const plExtensionRegistryI* ptExtensionRegistry = pl_get_api_latest(ptApiRegistry, plExtensionRegistryI);
     ptExtensionRegistry->load("pl_unity_ext", NULL, NULL, true);
@@ -795,6 +1000,13 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
     else
         printf("[bridge] listening on udp://%s:%d\n", BRIDGE_HOST, BRIDGE_PORT);
 
+    if(!pl__open_control_socket(ptAppData))
+        printf("[bridge] failed control socket udp://%s:%d\n", BRIDGE_CONTROL_HOST, BRIDGE_CONTROL_PORT);
+    else
+        printf("[bridge] control target udp://%s:%d\n", BRIDGE_CONTROL_HOST, BRIDGE_CONTROL_PORT);
+
+    pl__send_spawn_mode(ptAppData);
+
     return ptAppData;
 }
 
@@ -802,6 +1014,7 @@ PL_EXPORT void
 pl_app_shutdown(plAppData* ptAppData)
 {
     pl__close_bridge_socket(ptAppData);
+    pl__close_control_socket(ptAppData);
     gptStarter->cleanup();
     gptWindows->destroy(ptAppData->ptWindow);
     free(ptAppData);
@@ -881,6 +1094,14 @@ pl_app_update(plAppData* ptAppData)
     {
         fGroundZ = pl__estimate_ground_z(&ptAppData->tFrame);
         tRootMarker = pl__get_frame_root(&ptAppData->tFrame);
+
+        if(ptAppData->bFollowLastSpawn)
+        {
+            // Keep anchor live with current root while follow mode is active.
+            ptAppData->tFrame.tSpawnAnchor = tRootMarker;
+            ptAppData->tFrame.bHasSpawnAnchor = true;
+        }
+
         if(ptAppData->tFrame.uBodyCount > 0)
         {
             // Keep the XY grid fixed in world space so root motion is visible against axes.
@@ -931,6 +1152,84 @@ pl_app_update(plAppData* ptAppData)
             0,
             0,
             (plDrawSolidOptions){.uColor = PL_COLOR_32_RGBA(1.0f, 0.3f, 0.2f, 1.0f)});
+    }
+
+    if(ptAppData->bShowSpawnMarkers && ptAppData->bHasFrame)
+    {
+        if(ptAppData->tFrame.bHasWorldCenter)
+        {
+            const plVec3 tC = ptAppData->tFrame.tWorldCenter;
+            const float fLen = 0.20f;
+            const float fZ = tC.z + 0.01f;
+            const plDrawLineOptions tCenterLine = {
+                .uColor = PL_COLOR_32_RGBA(1.0f, 0.7f, 1.0f, 1.0f),
+                .fThickness = 1.2f,
+            };
+            gptDraw->add_3d_line(
+                ptAppData->pt3dDrawlist,
+                (plVec3){tC.x - fLen, tC.y, fZ},
+                (plVec3){tC.x + fLen, tC.y, fZ},
+                tCenterLine);
+            gptDraw->add_3d_line(
+                ptAppData->pt3dDrawlist,
+                (plVec3){tC.x, tC.y - fLen, fZ},
+                (plVec3){tC.x, tC.y + fLen, fZ},
+                tCenterLine);
+        }
+
+        if(ptAppData->tFrame.bHasSpawnAnchor)
+        {
+            const plVec3 tA = ptAppData->tFrame.tSpawnAnchor;
+            const float fLen = 0.22f;
+            const float fZ = tA.z + 0.01f;
+            const plDrawLineOptions tAnchorLine = {
+                .uColor = PL_COLOR_32_RGBA(1.0f, 0.35f, 1.0f, 1.0f),
+                .fThickness = 1.2f,
+            };
+            // Draw a small ground-plane cross instead of a filled marker.
+            gptDraw->add_3d_line(
+                ptAppData->pt3dDrawlist,
+                (plVec3){tA.x - fLen, tA.y, fZ},
+                (plVec3){tA.x + fLen, tA.y, fZ},
+                tAnchorLine);
+            gptDraw->add_3d_line(
+                ptAppData->pt3dDrawlist,
+                (plVec3){tA.x, tA.y - fLen, fZ},
+                (plVec3){tA.x, tA.y + fLen, fZ},
+                tAnchorLine);
+        }
+
+        if(ptAppData->tFrame.bHasSpawnAnchor && ptAppData->tFrame.bHasWorldCenter)
+        {
+            const plVec3 tC = ptAppData->tFrame.tWorldCenter;
+            const plVec3 tA = ptAppData->tFrame.tSpawnAnchor;
+            plVec3 tDir = {
+                tA.x - tC.x,
+                tA.y - tC.y,
+                tA.z - tC.z,
+            };
+            const float fLen = pl_length_vec3(tDir);
+            if(fLen > 1e-5f)
+            {
+                tDir = pl_mul_vec3_scalarf(tDir, 1.0f / fLen);
+                const float fStub = pl_minf(0.7f, fLen * 0.35f);
+                const plDrawLineOptions tLinkLine = {
+                    .uColor = PL_COLOR_32_RGBA(1.0f, 0.7f, 1.0f, 1.0f),
+                    .fThickness = 1.0f,
+                };
+                // Draw short connector stubs near each marker instead of one long segment.
+                gptDraw->add_3d_line(
+                    ptAppData->pt3dDrawlist,
+                    tC,
+                    (plVec3){tC.x + tDir.x * fStub, tC.y + tDir.y * fStub, tC.z + tDir.z * fStub},
+                    tLinkLine);
+                gptDraw->add_3d_line(
+                    ptAppData->pt3dDrawlist,
+                    tA,
+                    (plVec3){tA.x - tDir.x * fStub, tA.y - tDir.y * fStub, tA.z - tDir.z * fStub},
+                    tLinkLine);
+            }
+        }
     }
 
     pl__draw_bridge_frame(ptAppData);
