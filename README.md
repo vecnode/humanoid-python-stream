@@ -135,10 +135,8 @@ flowchart LR
 
         subgraph S[Real-time Audio]
                 direction TB
-                T[TTS Model
-                FastSpeech 2 + HiFi-GAN]
-                O[Audio Output
-                low-latency playback]
+                T[TTS Model<br/>FastSpeech 2 + HiFi-GAN]
+                O[Audio Output<br/>low-latency playback]
         end
 
         P --> E --> D --> R --> X --> B --> G
