@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ISAACGYM_BINDINGS_DIR="${ROOT_DIR}/isaacgym/python/isaacgym/_bindings/linux-x86_64"
 
 BUILD_VIEWER=0
 KEEP_VIEWER=0
@@ -51,6 +52,14 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ -f "${ROOT_DIR}/CLoSD/closd/run.py" ]]; then
+  if [[ -n "${CONDA_PREFIX:-}" && -d "${CONDA_PREFIX}/lib" ]]; then
+    export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+  fi
+
+  if [[ -d "${ISAACGYM_BINDINGS_DIR}" ]]; then
+    export LD_LIBRARY_PATH="${ISAACGYM_BINDINGS_DIR}:${LD_LIBRARY_PATH:-}"
+  fi
+
   cd "${ROOT_DIR}/CLoSD"
   python closd/run.py "${CLOSD_ARGS[@]}"
 else
