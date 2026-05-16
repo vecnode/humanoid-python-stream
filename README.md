@@ -100,6 +100,7 @@ The launcher runs pilotlight_integration/sync_closd_overlay.sh before starting C
 | CLoSD RL policy | [Humanoid.pth](CLoSD/output/CLoSD/CLoSD_t2m_finetune/Humanoid.pth) | AMP-based physics RL controller that drives the humanoid to track DiP predictions |
 | SMPL body model | [SMPL_NEUTRAL.pkl](CLoSD/closd/diffusion_planner/body_models/smpl/SMPL_NEUTRAL.pkl) | Body shape / joint regression used by both systems |
 | BERT text encoder | `distilbert-base-uncased` via HuggingFace cache (`~/.cache/huggingface/`) | Encodes the text prompt into an embedding that conditions DiP |
+| Real-time audio branch (pluggable) | FastSpeech 2 + HiFi-GAN | Converts text/conditioning into low-latency speech output for real-time playback |
 
 
 
@@ -132,8 +133,16 @@ flowchart LR
                 skeleton + scene updates]
         end
 
+        subgraph S[Real-time Audio]
+                direction TB
+                T[TTS Model
+                FastSpeech 2 + HiFi-GAN]
+                O[Audio Output
+                low-latency playback]
+        end
+
         P --> E --> D --> R --> X --> B --> G
+        E --> T --> O
         G -- user sees result, issues next prompt --> P
         X -- current state feedback --> D
 ```
-
