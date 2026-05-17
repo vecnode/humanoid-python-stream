@@ -23,6 +23,7 @@
 #include "pl_graphics_ext.h"
 #include "pl_draw_ext.h"
 #include "pl_starter_ext.h"
+#include "pl_ui_ext.h"
 
 #define BRIDGE_HOST "127.0.0.1"
 #define BRIDGE_PORT 45678
@@ -85,8 +86,6 @@ typedef struct _plAppData
 {
     plWindow* ptWindow;
     plDrawList3D* pt3dDrawlist;
-    plDrawList2D* ptHudDrawlist;
-    plDrawLayer2D* ptHudLayer;
     plCamera tCamera;
 
     int iSocketFd;
@@ -111,7 +110,6 @@ typedef struct _plAppData
     bool bShowBlue;
     bool bShowGreen;
     bool bShowRed;
-    bool bHudWantsMouse;
 } plAppData;
 
 const plIOI*       gptIO      = NULL;
@@ -119,24 +117,7 @@ const plWindowI*   gptWindows = NULL;
 const plGraphicsI* gptGfx     = NULL;
 const plDrawI*     gptDraw    = NULL;
 const plStarterI*  gptStarter = NULL;
-
-// Shared HUD palette values for quick tweaking and consistency.
-static const plVec3 gtUiColorToggleOn  = {0.20f, 0.45f, 0.20f};
-static const plVec3 gtUiColorToggleOff = {0.25f, 0.25f, 0.25f};
-
-static inline uint32_t
-pl__ui_color_rgb_alpha(plVec3 tRgb, float fAlpha)
-{
-    return PL_COLOR_32_RGBA(tRgb.x, tRgb.y, tRgb.z, fAlpha);
-}
-
-static inline uint32_t
-pl__ui_color_toggle_bg(bool bEnabled, bool bHover)
-{
-    if(bEnabled)
-        return pl__ui_color_rgb_alpha(gtUiColorToggleOn, bHover ? 0.95f : 0.85f);
-    return pl__ui_color_rgb_alpha(gtUiColorToggleOff, bHover ? 0.85f : 0.75f);
-}
+const plUiI*       gptUI      = NULL;
 
 static inline float
 pl__wrap_angle(float tTheta)
@@ -592,65 +573,83 @@ pl__dist_sq_vec3(plVec3 a, plVec3 b)
 }
 
 static void
-pl__process_hud_buttons(plAppData* ptAppData)
+pl__draw_ui(plAppData* ptAppData, float fGroundZ)
 {
     if(!ptAppData)
         return;
 
-    ptAppData->bHudWantsMouse = false;
+    const char* pcPrompt = "(no prompt in packet)";
+    if(ptAppData->bHasFrame && ptAppData->tFrame.acPrompt[0] != '\0')
+        pcPrompt = ptAppData->tFrame.acPrompt;
 
-    const float fButtonX = 20.0f;
-    const float fButtonY = 260.0f;
-    const float fButtonW = 92.0f;
-    const float fButtonH = 22.0f;
-    const float fGap = 8.0f;
-
-    bool* apbToggles[4] = {
-        &ptAppData->bShowGreen,
-        &ptAppData->bShowYellow,
-        &ptAppData->bShowBlue,
-        &ptAppData->bShowRed,
-    };
-
-    for(uint32_t i = 0; i < 4; i++)
+    // --- Prompt window (pinned top-left) ---
+    gptUI->set_next_window_pos((plVec2){12.0f, 12.0f}, PL_UI_COND_ALWAYS);
+    if(gptUI->begin_window("Prompt", NULL, PL_UI_WINDOW_FLAGS_AUTO_SIZE | PL_UI_WINDOW_FLAGS_NO_COLLAPSE))
     {
-        const float fX0 = fButtonX + (fButtonW + fGap) * (float)i;
-        const plVec2 tMin = {fX0, fButtonY};
-        const plVec2 tMax = {fX0 + fButtonW, fButtonY + fButtonH};
-        const bool bHover = gptIO->is_mouse_hovering_rect(tMin, tMax);
-        if(bHover)
-            ptAppData->bHudWantsMouse = true;
-
-        if(bHover && gptIO->is_mouse_clicked(PL_MOUSE_BUTTON_LEFT, false))
-            *apbToggles[i] = !(*apbToggles[i]);
+        gptUI->layout_static(0.0f, 700.0f, 1);
+        gptUI->labeled_text("Prompt:", "%s", pcPrompt);
+        gptUI->end_window();
     }
 
-    const plVec2 tFollowMin = {20.0f, 304.0f};
-    const plVec2 tFollowMax = {128.0f, 328.0f};
-    const bool bFollowHover = gptIO->is_mouse_hovering_rect(tFollowMin, tFollowMax);
-    if(bFollowHover)
-        ptAppData->bHudWantsMouse = true;
-    if(bFollowHover && gptIO->is_mouse_clicked(PL_MOUSE_BUTTON_LEFT, false))
+    // --- Info + controls window ---
+    gptUI->set_next_window_pos((plVec2){12.0f, 66.0f}, PL_UI_COND_ONCE);
+    if(gptUI->begin_window("Camera", NULL, PL_UI_WINDOW_FLAGS_AUTO_SIZE))
     {
-        ptAppData->bFollowLastSpawn = !ptAppData->bFollowLastSpawn;
-        pl__send_spawn_mode(ptAppData);
+        const float fYawDeg   = ptAppData->tCamera.fYaw   * (180.0f / PL_PI);
+        const float fPitchDeg = ptAppData->tCamera.fPitch * (180.0f / PL_PI);
+
+        gptUI->labeled_text("pos   ", "x %.2f  y %.2f  z %.2f",
+            ptAppData->tCamera.tPos.x, ptAppData->tCamera.tPos.y, ptAppData->tCamera.tPos.z);
+        gptUI->labeled_text("target", "x %.2f  y %.2f  z %.2f",
+            ptAppData->tOrbitTarget.x, ptAppData->tOrbitTarget.y, ptAppData->tOrbitTarget.z);
+        gptUI->labeled_text("yaw / pitch", "%.1f deg  /  %.1f deg", fYawDeg, fPitchDeg);
+        gptUI->labeled_text("dist / gnd z", "%.2f  /  %.2f", ptAppData->fOrbitDist, fGroundZ);
+        gptUI->labeled_text("bodies", "%u  auto-follow %s",
+            ptAppData->tFrame.uBodyCount, ptAppData->bAutoFollow ? "on" : "off");
+
+        // Metric ruler as text
+        plIO* ptIO = gptIO->get_io();
+        const plVec2 tViewport = {ptIO->tMainViewportSize.x, ptIO->tMainViewportSize.y};
+        float fPixelsPerMeter = 0.0f;
+        if(pl__measure_pixels_for_meter(ptAppData, tViewport, fGroundZ, &fPixelsPerMeter))
+            gptUI->labeled_text("scale", "1.00 m = %.0f px", fPixelsPerMeter);
+        else
+            gptUI->labeled_text("scale", "1.00 m (off-screen)");
+
+        gptUI->separator();
+
+        // Legend
+        gptUI->color_text((plVec4){0.2f,  0.9f, 0.4f, 1.0f}, "GREEN  - predicted trajectory / pose points");
+        gptUI->color_text((plVec4){0.95f, 0.9f, 0.1f, 1.0f}, "YELLOW - live rigid-body joints");
+        gptUI->color_text((plVec4){0.2f,  0.7f, 1.0f, 1.0f}, "BLUE   - skeleton bone links");
+        gptUI->color_text((plVec4){1.0f,  0.3f, 0.2f, 1.0f}, "RED    - root / center marker");
+
+        gptUI->separator();
+
+        // Toggle checkboxes
+        gptUI->checkbox("Show GREEN",  &ptAppData->bShowGreen);
+        gptUI->checkbox("Show YELLOW", &ptAppData->bShowYellow);
+        gptUI->checkbox("Show BLUE",   &ptAppData->bShowBlue);
+        gptUI->checkbox("Show RED",    &ptAppData->bShowRed);
+
+        gptUI->separator();
+
+        // Spawn mode controls
+        gptUI->labeled_text("Spawn mode", "%s",
+            ptAppData->bFollowLastSpawn ? "FOLLOW LAST END" : "CENTER");
+
+        if(gptUI->button("Follow Last"))
+        {
+            ptAppData->bFollowLastSpawn = !ptAppData->bFollowLastSpawn;
+            pl__send_spawn_mode(ptAppData);
+        }
+        if(gptUI->button("Capture Spawn Anchor"))
+            pl__send_capture_spawn_anchor(ptAppData);
+        if(gptUI->button("Reset Episode"))
+            pl__send_reset_episode(ptAppData);
+
+        gptUI->end_window();
     }
-
-    const plVec2 tCaptureMin = {136.0f, 304.0f};
-    const plVec2 tCaptureMax = {252.0f, 328.0f};
-    const bool bCaptureHover = gptIO->is_mouse_hovering_rect(tCaptureMin, tCaptureMax);
-    if(bCaptureHover)
-        ptAppData->bHudWantsMouse = true;
-    if(bCaptureHover && gptIO->is_mouse_clicked(PL_MOUSE_BUTTON_LEFT, false))
-        pl__send_capture_spawn_anchor(ptAppData);
-
-    const plVec2 tResetMin = {260.0f, 304.0f};
-    const plVec2 tResetMax = {350.0f, 328.0f};
-    const bool bResetHover = gptIO->is_mouse_hovering_rect(tResetMin, tResetMax);
-    if(bResetHover)
-        ptAppData->bHudWantsMouse = true;
-    if(bResetHover && gptIO->is_mouse_clicked(PL_MOUSE_BUTTON_LEFT, false))
-        pl__send_reset_episode(ptAppData);
 }
 
 static void
@@ -682,182 +681,6 @@ pl__draw_ground_grid(plAppData* ptAppData, plVec3 tCenter, float fGroundZ)
             (plVec3){tCenter.x + (float)iHalf, fY, fGroundZ},
             tOptY);
     }
-}
-
-static void
-pl__draw_hud(plAppData* ptAppData, float fGroundZ)
-{
-    if(!ptAppData || !ptAppData->ptHudLayer)
-        return;
-
-    const char* pcPrompt = "(no prompt in packet)";
-    if(ptAppData->bHasFrame && ptAppData->tFrame.acPrompt[0] != '\0')
-        pcPrompt = ptAppData->tFrame.acPrompt;
-
-    gptDraw->add_rect_filled(
-        ptAppData->ptHudLayer,
-        (plVec2){12.0f, 12.0f},
-        (plVec2){760.0f, 58.0f},
-        (plDrawSolidOptions){.uColor = PL_COLOR_32_RGBA(0.05f, 0.05f, 0.05f, 0.80f)});
-
-    gptDraw->add_text(
-        ptAppData->ptHudLayer,
-        (plVec2){20.0f, 26.0f},
-        "Prompt:",
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 0.85f, 0.2f, 1.0f), .fSize = 15.0f});
-
-    gptDraw->add_text(
-        ptAppData->ptHudLayer,
-        (plVec2){92.0f, 26.0f},
-        pcPrompt,
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 15.0f, .fWrap = 650.0f});
-
-    // Camera panel (imgui-like info block)
-    gptDraw->add_rect_filled(
-        ptAppData->ptHudLayer,
-        (plVec2){12.0f, 66.0f},
-        (plVec2){460.0f, 340.0f},
-        (plDrawSolidOptions){.uColor = PL_COLOR_32_RGBA(0.04f, 0.04f, 0.04f, 0.78f)});
-
-    gptDraw->add_text(
-        ptAppData->ptHudLayer,
-        (plVec2){20.0f, 78.0f},
-        "Camera",
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(0.65f, 0.85f, 1.0f, 1.0f), .fSize = 14.0f});
-
-    char acLine[256];
-    float fYawDeg = ptAppData->tCamera.fYaw * (180.0f / PL_PI);
-    float fPitchDeg = ptAppData->tCamera.fPitch * (180.0f / PL_PI);
-
-    snprintf(acLine, sizeof(acLine), "pos    x %.2f  y %.2f  z %.2f", ptAppData->tCamera.tPos.x, ptAppData->tCamera.tPos.y, ptAppData->tCamera.tPos.z);
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 98.0f}, acLine,
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 13.0f});
-
-    snprintf(acLine, sizeof(acLine), "target x %.2f  y %.2f  z %.2f", ptAppData->tOrbitTarget.x, ptAppData->tOrbitTarget.y, ptAppData->tOrbitTarget.z);
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 116.0f}, acLine,
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 13.0f});
-
-    snprintf(acLine, sizeof(acLine), "yaw %.1f deg   pitch %.1f deg", fYawDeg, fPitchDeg);
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 134.0f}, acLine,
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 13.0f});
-
-    snprintf(acLine, sizeof(acLine), "distance %.2f   ground z %.2f", ptAppData->fOrbitDist, fGroundZ);
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 152.0f}, acLine,
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 13.0f});
-
-    snprintf(acLine, sizeof(acLine), "auto-follow %s   bodies %u", ptAppData->bAutoFollow ? "on" : "off", ptAppData->tFrame.uBodyCount);
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 170.0f}, acLine,
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(0.85f, 0.95f, 0.85f, 1.0f), .fSize = 13.0f});
-
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 188.0f},
-        "GREEN: Predicted trajectory/pose points from CLoSD",
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(0.2f, 1.0f, 0.4f, 1.0f), .fSize = 12.0f});
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 204.0f},
-        "YELLOW: Live rigid-body joint points",
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(0.95f, 0.9f, 0.1f, 1.0f), .fSize = 12.0f});
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 220.0f},
-        "BLUE: Live skeleton bone links",
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(0.2f, 0.7f, 1.0f, 1.0f), .fSize = 12.0f});
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 236.0f},
-        "RED: Root/center marker",
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 0.3f, 0.2f, 1.0f), .fSize = 12.0f});
-
-    // Live metric ruler: shows how large 1 meter appears with current camera setup.
-    plIO* ptIO = gptIO->get_io();
-    const plVec2 tViewport = {ptIO->tMainViewportSize.x, ptIO->tMainViewportSize.y};
-    float fPixelsPerMeter = 0.0f;
-    if(pl__measure_pixels_for_meter(ptAppData, tViewport, fGroundZ, &fPixelsPerMeter))
-    {
-        const float fBarPx = pl_clampf(24.0f, fPixelsPerMeter, 180.0f);
-        const plVec2 tA = {568.0f, 86.0f};
-        const plVec2 tB = {568.0f + fBarPx, 86.0f};
-        const plDrawLineOptions tScaleLine = {
-            .uColor = PL_COLOR_32_RGBA(0.95f, 0.95f, 0.95f, 1.0f),
-            .fThickness = 1.6f,
-        };
-        gptDraw->add_line(ptAppData->ptHudLayer, tA, tB, tScaleLine);
-        gptDraw->add_line(ptAppData->ptHudLayer, (plVec2){tA.x, tA.y - 5.0f}, (plVec2){tA.x, tA.y + 5.0f}, tScaleLine);
-        gptDraw->add_line(ptAppData->ptHudLayer, (plVec2){tB.x, tB.y - 5.0f}, (plVec2){tB.x, tB.y + 5.0f}, tScaleLine);
-
-        char acScale[128] = {0};
-        snprintf(acScale, sizeof(acScale), "scale |__| = 1.00 m (%.0f px)", fPixelsPerMeter);
-        gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){568.0f, 94.0f}, acScale,
-            (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(0.90f, 0.95f, 1.0f, 1.0f), .fSize = 12.0f});
-    }
-    else
-    {
-        gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){568.0f, 94.0f}, "scale |__| = 1.00 m (off-screen)",
-            (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(0.70f, 0.75f, 0.80f, 1.0f), .fSize = 12.0f});
-    }
-
-    const float fButtonX = 20.0f;
-    const float fButtonY = 260.0f;
-    const float fButtonW = 92.0f;
-    const float fButtonH = 22.0f;
-    const float fGap = 8.0f;
-
-    const char* apcLabels[4] = {"GREEN", "YELLOW", "BLUE", "RED"};
-    const bool abEnabled[4] = {
-        ptAppData->bShowGreen,
-        ptAppData->bShowYellow,
-        ptAppData->bShowBlue,
-        ptAppData->bShowRed,
-    };
-
-    for(uint32_t i = 0; i < 4; i++)
-    {
-        const float fX0 = fButtonX + (fButtonW + fGap) * (float)i;
-        const plVec2 tMin = {fX0, fButtonY};
-        const plVec2 tMax = {fX0 + fButtonW, fButtonY + fButtonH};
-        const bool bHover = gptIO->is_mouse_hovering_rect(tMin, tMax);
-        const plDrawSolidOptions tBg = {
-            .uColor = pl__ui_color_toggle_bg(abEnabled[i], bHover)
-        };
-        gptDraw->add_rect_filled(ptAppData->ptHudLayer, tMin, tMax, tBg);
-
-        char acButton[32] = {0};
-        snprintf(acButton, sizeof(acButton), "%s %s", apcLabels[i], abEnabled[i] ? "ON" : "OFF");
-        gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){fX0 + 6.0f, fButtonY + 5.0f}, acButton,
-            (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 11.0f});
-    }
-
-    const char* pcSpawnMode = ptAppData->bFollowLastSpawn ? "FOLLOW LAST END" : "CENTER";
-    char acSpawnLine[128] = {0};
-    snprintf(acSpawnLine, sizeof(acSpawnLine), "spawn mode: %s", pcSpawnMode);
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){20.0f, 288.0f}, acSpawnLine,
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(0.95f, 0.95f, 0.95f, 1.0f), .fSize = 12.0f});
-
-    const plVec2 tFollowMin = {20.0f, 304.0f};
-    const plVec2 tFollowMax = {128.0f, 328.0f};
-    gptDraw->add_rect_filled(
-        ptAppData->ptHudLayer,
-        tFollowMin,
-        tFollowMax,
-        (plDrawSolidOptions){.uColor = ptAppData->bFollowLastSpawn
-            ? PL_COLOR_32_RGBA(0.20f, 0.45f, 0.20f, 0.90f)
-            : PL_COLOR_32_RGBA(0.30f, 0.30f, 0.30f, 0.85f)});
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){28.0f, 310.0f}, "FOLLOW LAST",
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 11.0f});
-
-    const plVec2 tCaptureMin = {136.0f, 304.0f};
-    const plVec2 tCaptureMax = {252.0f, 328.0f};
-    gptDraw->add_rect_filled(
-        ptAppData->ptHudLayer,
-        tCaptureMin,
-        tCaptureMax,
-        (plDrawSolidOptions){.uColor = PL_COLOR_32_RGBA(0.30f, 0.30f, 0.30f, 0.85f)});
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){144.0f, 310.0f}, "CAPTURE",
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 1.0f, 1.0f, 1.0f), .fSize = 11.0f});
-
-    const plVec2 tResetMin = {260.0f, 304.0f};
-    const plVec2 tResetMax = {350.0f, 328.0f};
-    gptDraw->add_rect_filled(
-        ptAppData->ptHudLayer,
-        tResetMin,
-        tResetMax,
-        (plDrawSolidOptions){.uColor = PL_COLOR_32_RGBA(0.35f, 0.26f, 0.20f, 0.90f)});
-    gptDraw->add_text(ptAppData->ptHudLayer, (plVec2){268.0f, 310.0f}, "RESET NOW",
-        (plDrawTextOptions){.ptFont = gptStarter->get_default_font(), .uColor = PL_COLOR_32_RGBA(1.0f, 0.95f, 0.9f, 1.0f), .fSize = 11.0f});
 }
 
 static void
@@ -999,6 +822,7 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
         gptGfx     = pl_get_api_latest(ptApiRegistry, plGraphicsI);
         gptDraw    = pl_get_api_latest(ptApiRegistry, plDrawI);
         gptStarter = pl_get_api_latest(ptApiRegistry, plStarterI);
+        gptUI      = pl_get_api_latest(ptApiRegistry, plUiI);
 
         // Hot-reload safety: do not preserve potentially inverted camera state.
         ptAppData->bAutoFollow = true;
@@ -1012,7 +836,6 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
         ptAppData->bShowBlue = false;
         ptAppData->bShowGreen = false;
         ptAppData->bShowRed = true;
-        ptAppData->bHudWantsMouse = false;
         ptAppData->bFollowLastSpawn = true;
         pl__camera_orbit_from_angles(&ptAppData->tCamera, ptAppData->tOrbitTarget, ptAppData->fOrbitDist);
         return ptAppData;
@@ -1029,7 +852,6 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
     ptAppData->bShowBlue = false;
     ptAppData->bShowGreen = false;
     ptAppData->bShowRed = true;
-    ptAppData->bHudWantsMouse = false;
     ptAppData->bFollowLastSpawn = true;
 
     const plExtensionRegistryI* ptExtensionRegistry = pl_get_api_latest(ptApiRegistry, plExtensionRegistryI);
@@ -1041,6 +863,7 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
     gptGfx     = pl_get_api_latest(ptApiRegistry, plGraphicsI);
     gptDraw    = pl_get_api_latest(ptApiRegistry, plDrawI);
     gptStarter = pl_get_api_latest(ptApiRegistry, plStarterI);
+    gptUI      = pl_get_api_latest(ptApiRegistry, plUiI);
 
     plWindowDesc tWindowDesc = {
         .pcTitle = "CLoSD PilotLight Bridge",
@@ -1063,8 +886,6 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
     gptStarter->finalize();
 
     ptAppData->pt3dDrawlist = gptDraw->request_3d_drawlist();
-    ptAppData->ptHudDrawlist = gptDraw->request_2d_drawlist();
-    ptAppData->ptHudLayer = gptDraw->request_2d_layer(ptAppData->ptHudDrawlist);
 
     ptAppData->tCamera = (plCamera){
         .tPos         = {5.0f, 10.0f, 10.0f},
@@ -1128,15 +949,13 @@ pl_app_update(plAppData* ptAppData)
         printf("[bridge] auto-follow: %s\n", ptAppData->bAutoFollow ? "on" : "off");
     }
 
-    pl__process_hud_buttons(ptAppData);
-
     // --- mouse orbit (left-drag rotates, scroll zooms) ---
     static const float fRotSpeed  = 0.005f;
     static const float fPitchMin  = -(PL_PI * 0.49f);
     static const float fPitchMax  =  (PL_PI * 0.49f);
 
     // left-drag: full orbit (yaw + pitch)
-    if(!ptAppData->bHudWantsMouse && gptIO->is_mouse_dragging(PL_MOUSE_BUTTON_LEFT, 1.0f))
+    if(!gptUI->wants_mouse_capture() && gptIO->is_mouse_dragging(PL_MOUSE_BUTTON_LEFT, 1.0f))
     {
         const plVec2 tDelta = gptIO->get_mouse_drag_delta(PL_MOUSE_BUTTON_LEFT, 1.0f);
         ptAppData->tCamera.fYaw   -= tDelta.x * fRotSpeed;
@@ -1147,7 +966,7 @@ pl_app_update(plAppData* ptAppData)
     }
 
     // right-drag: standard yaw-only orbit around Z-up axis.
-    if(!ptAppData->bHudWantsMouse && gptIO->is_mouse_dragging(PL_MOUSE_BUTTON_RIGHT, 1.0f))
+    if(!gptUI->wants_mouse_capture() && gptIO->is_mouse_dragging(PL_MOUSE_BUTTON_RIGHT, 1.0f))
     {
         const plVec2 tDelta = gptIO->get_mouse_drag_delta(PL_MOUSE_BUTTON_RIGHT, 1.0f);
 
@@ -1247,11 +1066,10 @@ pl_app_update(plAppData* ptAppData)
             ptAppData->bHasFrame ? 1 : 0);
     }
 
+    pl__draw_ui(ptAppData, fGroundZ);
+
     plIO* ptIO = gptIO->get_io();
     plRenderEncoder* ptEncoder = gptStarter->begin_main_pass();
-
-    pl__draw_hud(ptAppData, fGroundZ);
-    gptDraw->submit_2d_layer(ptAppData->ptHudLayer);
 
     const plMat4 tMVP = pl_mul_mat4(&ptAppData->tCamera.tProjMat, &ptAppData->tCamera.tViewMat);
     gptDraw->submit_3d_drawlist(
@@ -1261,14 +1079,6 @@ pl_app_update(plAppData* ptAppData)
         ptIO->tMainViewportSize.y,
         &tMVP,
         PL_DRAW_FLAG_DEPTH_TEST | PL_DRAW_FLAG_DEPTH_WRITE,
-        gptGfx->get_swapchain_info(gptStarter->get_swapchain()).tSampleCount
-    );
-
-    gptDraw->submit_2d_drawlist(
-        ptAppData->ptHudDrawlist,
-        ptEncoder,
-        ptIO->tMainViewportSize.x,
-        ptIO->tMainViewportSize.y,
         gptGfx->get_swapchain_info(gptStarter->get_swapchain()).tSampleCount
     );
 

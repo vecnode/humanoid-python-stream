@@ -98,7 +98,7 @@ if [[ -f "${ROOT_DIR}/CLoSD/closd/run.py" ]]; then
   fi
 
   cd "${ROOT_DIR}/CLoSD"
-  python closd/run.py "${DEFAULT_ARGS[@]}" "${CLOSD_ARGS[@]}"
+  python3 closd/run.py "${DEFAULT_ARGS[@]}" "${CLOSD_ARGS[@]}"
 else
   echo "missing CLoSD entrypoint: ${ROOT_DIR}/CLoSD/closd/run.py"
   exit 1
