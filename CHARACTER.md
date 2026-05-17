@@ -75,20 +75,43 @@ If you have or want to use **SMPL model parameters**, the system automatically g
 
 If you have a **pre-made humanoid character mesh**:
 
+**Short answer for your current assets (FBX + GLTF + textures)**:
+- **Yes, you should rig in Blender (or another DCC) if the model is not already rigged to a humanoid skeleton.**
+- **No, dropping in a GLTF file alone will not make this current CLoSD -> bridge pipeline animate correctly.**
+- In the current design, motion comes in as **24 joint positions**; without a matching rig/skeleton mapping, the character cannot follow those joints.
+
+**What GLTF support means here**:
+- PilotLight may be able to **load and render** a `.gltf/.glb` mesh, materials, and textures.
+- That is **not the same** as being fully driven by CLoSD motion data.
+- For the character to move with your stream, you still need either:
+  - a per-joint mesh workflow (current plan: one mesh per SMPL joint), or
+  - a future skinning workflow (single skinned mesh + bone transforms), which is not the implemented path in this document.
+
 **Input Format Options**:
-1. **OBJ + Armature** (Blender native)
-   - File: `character.obj` (mesh vertices/faces)
-   - File: `character.blend` (skeleton/rigging information)
-   - Must have skeleton with 24 bones matching SMPL joint names
+1. **FBX Rigged Character** (best source format for editing)
+    - File: `character.fbx`
+    - Must include skeleton (armature) and skin weights
+    - Preferred for retargeting and fixing bones in Blender
 
-2. **FBX Rigged Character** (Game engine format)
-   - File: `character.fbx`
-   - Must include skeleton definition
-   - Bones should be named to match SMPL joints
+2. **GLTF/GLB Rigged Character** (render-friendly delivery format)
+    - File: `character.gltf` or `character.glb`
+    - Include texture files (or embed textures in `.glb`)
+    - Can be used for display assets, but still requires correct rig mapping for motion-driven use
 
-3. **COLLADA DAE** (3D exchange format)
-   - File: `character.dae`
-   - Includes mesh + skeleton in one file
+3. **OBJ + Armature in Blender**
+    - File: `character.obj` (mesh)
+    - File: `character.blend` (rigging)
+    - Valid if you complete rigging/weighting in Blender
+
+4. **COLLADA DAE**
+    - File: `character.dae`
+    - Includes mesh + skeleton if exported that way
+
+**Mandatory rig requirements (for motion-driven character)**:
+- Exactly 24 SMPL-compatible bones in the expected hierarchy
+- Exact bone names (case-sensitive) matching the SMPL list used in this repo
+- Skin weights painted so each body region is influenced by the correct bones
+- Rest pose in T-pose or A-pose
 
 **Size & Scale Requirements**:
 - **Unit**: Meters
@@ -97,31 +120,65 @@ If you have a **pre-made humanoid character mesh**:
 - **Coordinate System**: Z-up (matches CLoSD/Isaac)
 - **Scale Verification**: Shoulder width ~0.5m, foot length ~0.25m
 
+**Explicit workflow for your case (FBX/GLTF + textures)**:
+
+1. **Open FBX in Blender and verify rig quality**:
+    - If already rigged, validate bone names + hierarchy + weights
+    - If not rigged, add/retarget to the 24-bone SMPL-compatible skeleton
+    - Fix orientation and scale before export
+
+2. **Keep textures organized**:
+    - If using `.gltf`, keep referenced texture paths valid relative to the `.gltf` file
+    - If using `.glb`, confirm textures are embedded and load correctly
+
+3. **Decide the runtime path**:
+    - **Current implementation path (recommended now)**: convert to per-joint meshes (`{bone_name}.stl`) for each of the 24 joints
+    - **Future path (not covered by current rendering code)**: single skinned GLTF mesh with shader skinning driven by bone transforms
+
+4. **For current path, export per-joint geometry**:
+    - Split mesh by bone influence in Blender
+    - Export one file per joint: `Pelvis.stl`, `L_Hip.stl`, ..., `R_Hand.stl`
+    - Ensure all 24 files exist and match exact joint names
+
+5. **Generate/validate character config**:
+    - Create `config.json` with joint order, colors, scale, and mesh file paths
+    - Ensure index order matches incoming bridge joint order exactly
+
+6. **Test in PilotLight**:
+    - First test static loading (mesh appears with correct textures/material intent)
+    - Then test streamed motion (joints update and mesh pieces follow correctly)
+    - Keep sphere fallback enabled until motion-driven mesh rendering is validated
+
+**How to answer "is this enough to update GLTF and it moves?"**:
+- **If you only replace a static GLTF asset**: it will likely render, but not move correctly with CLoSD joint stream.
+- **If you also provide proper rig mapping and the rendering path that consumes joint/bone transforms**: yes, it can move.
+- In this document's current pipeline, that means preparing the 24-joint compatible assets and mapping them explicitly.
+
 **Processing Steps** (to convert to per-joint STL files):
 
 1. **Export from Blender/Unreal/Maya**:
-   - Export full body mesh + skeleton
-   - Verify bones match SMPL 24-joint structure:
-     ```
-     Pelvis (root)
-     ├── L_Hip → L_Knee → L_Ankle → L_Toe
-     ├── R_Hip → R_Knee → R_Ankle → R_Toe
-     ├── Torso → Spine → Chest → Neck → Head
-     └── Shoulders → Elbows → Wrists → Hands (left/right)
-     ```
+    - Export full body mesh + skeleton
+    - Verify bones match SMPL 24-joint structure:
+      ```
+      Pelvis (root)
+      ├── L_Hip → L_Knee → L_Ankle → L_Toe
+      ├── R_Hip → R_Knee → R_Ankle → R_Toe
+      ├── Torso → Spine → Chest → Neck → Head
+      └── Shoulders → Elbows → Wrists → Hands (left/right)
+      ```
 
 2. **Split Mesh by Bones** (using provided tools):
-   - Use `CLoSD/closd/blender/obj_utils.py::xml2mesh()` to convert MJCF → mesh
-   - Or write custom script to extract mesh portions for each bone
-   - Script should:
-     - Identify which vertices belong to each bone (via skin weights)
-     - Extract sub-mesh for each bone
-     - Export as `{bone_name}.stl`
+    - Use `CLoSD/closd/blender/obj_utils.py::xml2mesh()` to convert MJCF -> mesh
+    - Or write custom script to extract mesh portions for each bone
+    - Script should:
+      - Identify which vertices belong to each bone (via skin weights)
+      - Extract sub-mesh for each bone
+      - Export as `{bone_name}.stl`
 
 3. **Generate Convex Hulls** (simplification):
-   - Option: Create convex hull per bone for better performance
-   - Use `scipy.spatial.ConvexHull` or Blender's built-in convex hull
-   - Reduces vertices while maintaining collision shape
+    - Option: Create convex hull per bone for better performance
+    - Use `scipy.spatial.ConvexHull` or Blender's built-in convex hull
+    - Reduces vertices while maintaining collision shape
 
 **Example Blender Script** (to split mesh):
 ```python
