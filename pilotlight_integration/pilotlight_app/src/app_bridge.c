@@ -1,7 +1,16 @@
 /*
    app_bridge.c
      - PilotLight app plugin that visualizes CLoSD bridge packets
+
+    #=========================================================================
+    #  Maintainer Notes
+    #  Authored by vecnode (2026)
+    #  Purpose: Bridge CLoSD runtime packets into PilotLight visualization.
+    #  This file refers to the main application.
+    #=========================================================================
 */
+
+/* #============================== System Includes ============================== */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -25,6 +34,8 @@
 #include "pl_starter_ext.h"
 #include "pl_ui_ext.h"
 
+/* #=========================== Bridge Configuration ============================ */
+
 #define BRIDGE_HOST "127.0.0.1"
 #define BRIDGE_PORT 45678
 #define BRIDGE_CONTROL_HOST "127.0.0.1"
@@ -36,6 +47,8 @@
 #define MAX_PROMPT_CHARS 256
 
 #define ARRAY_COUNT(x) (sizeof(x) / sizeof((x)[0]))
+
+/* #============================= Core Data Types ============================== */
 
 typedef struct _plCamera
 {
@@ -94,6 +107,7 @@ typedef struct _plAppData
     bool bHasFrame;
     bool bAutoFollow;
     bool bFollowLastSpawn;
+    bool bInferenceContinuityLock;
 
     // orbit camera
     plVec3 tOrbitTarget;
@@ -112,12 +126,16 @@ typedef struct _plAppData
     bool bShowRed;
 } plAppData;
 
+/* #============================ API Entry Points ============================= */
+
 const plIOI*       gptIO      = NULL;
 const plWindowI*   gptWindows = NULL;
 const plGraphicsI* gptGfx     = NULL;
 const plDrawI*     gptDraw    = NULL;
 const plStarterI*  gptStarter = NULL;
 const plUiI*       gptUI      = NULL;
+
+/* #=========================== Camera Math Helpers =========================== */
 
 static inline float
 pl__wrap_angle(float tTheta)
@@ -263,6 +281,9 @@ pl__measure_pixels_for_meter(const plAppData* ptAppData, plVec2 tViewport, float
     *pfOutPixels = fPixels;
     return true;
 }
+
+/* #========================== Network Socket Helpers ========================= */
+
 static bool
 pl__open_bridge_socket(plAppData* ptAppData)
 {
@@ -372,6 +393,20 @@ pl__send_reset_episode(plAppData* ptAppData)
 {
     pl__send_control_json(ptAppData, "{\"action\":\"reset_episode\"}");
 }
+
+static void
+pl__send_inference_continuity_lock(plAppData* ptAppData)
+{
+    char acPayload[128] = {0};
+    snprintf(
+        acPayload,
+        sizeof(acPayload),
+        "{\"action\":\"set_inference_continuity_lock\",\"enabled\":%s}",
+        ptAppData->bInferenceContinuityLock ? "true" : "false");
+    pl__send_control_json(ptAppData, acPayload);
+}
+
+/* #============================ JSON Parse Helpers ============================ */
 
 static void
 pl__parse_optional_vec3_member(plJsonObject* ptRoot, const char* pcName, plVec3* ptOut, bool* pbHas)
@@ -501,6 +536,14 @@ pl__parse_bridge_packet(const char* pcJson, BridgeFrame* ptFrame)
 }
 
 static void
+pl__print_character_xy(const char* pcTag, plVec3 tPos)
+{
+    printf("[CHARACTER POSITION] %s x: %.3f, y: %.3f\n", pcTag, tPos.x, tPos.y);
+}
+
+/* #============================= UDP Polling Loop ============================= */
+
+static void
 pl__poll_bridge_socket(plAppData* ptAppData)
 {
     if(ptAppData->iSocketFd < 0)
@@ -520,6 +563,21 @@ pl__poll_bridge_socket(plAppData* ptAppData)
         BridgeFrame tFrame = {0};
         if(pl__parse_bridge_packet(ptAppData->acBuffer, &tFrame))
         {
+            const bool bHadPrevFrame = ptAppData->bHasFrame;
+            const BridgeFrame tPrevFrame = ptAppData->tFrame;
+
+            if(bHadPrevFrame)
+            {
+                const bool bPromptChanged = strcmp(tPrevFrame.acPrompt, tFrame.acPrompt) != 0;
+                if(bPromptChanged)
+                {
+                    const plVec3 tPrevRoot = tPrevFrame.uBodyCount > 0 ? tPrevFrame.atBodyPos[0] : (plVec3){0.0f, 0.0f, 0.0f};
+                    const plVec3 tNewRoot = tFrame.uBodyCount > 0 ? tFrame.atBodyPos[0] : (plVec3){0.0f, 0.0f, 0.0f};
+                    pl__print_character_xy("before", tPrevRoot);
+                    pl__print_character_xy("new", tNewRoot);
+                }
+            }
+
             ptAppData->tFrame = tFrame;
             ptAppData->bHasFrame = true;
             ptAppData->uPacketsParsed++;
@@ -555,6 +613,8 @@ pl__estimate_ground_z(const BridgeFrame* ptFrame)
     }
     return fMinZ;
 }
+
+/* #======================== Coordinate/Geometry Helpers ======================= */
 
 static inline plVec3
 pl__ref_to_sim_vec3(plVec3 tRef)
@@ -648,15 +708,26 @@ pl__draw_ui(plAppData* ptAppData, float fGroundZ)
         if(gptUI->button("Reset Episode"))
             pl__send_reset_episode(ptAppData);
 
+        gptUI->separator();
+        gptUI->labeled_text("Inference Continuity", "%s",
+            ptAppData->bInferenceContinuityLock ? "ON (trajectory bridge)" : "OFF (baseline)");
+        if(gptUI->button("Toggle Inference Continuity"))
+        {
+            ptAppData->bInferenceContinuityLock = !ptAppData->bInferenceContinuityLock;
+            pl__send_inference_continuity_lock(ptAppData);
+        }
+
         gptUI->end_window();
     }
 }
+
+/* #============================== Draw Helpers =============================== */
 
 static void
 pl__draw_ground_grid(plAppData* ptAppData, plVec3 tCenter, float fGroundZ)
 {
     const int   iHalf = 24;
-    const float fLine = 0.06f;
+    const float fLine = 0.04f;
     const plDrawLineOptions tGrid  = {.uColor = PL_COLOR_32_RGBA(0.30f, 0.30f, 0.30f, 1.0f), .fThickness = fLine};
     const plDrawLineOptions tAxisX = {.uColor = PL_COLOR_32_RGBA(0.75f, 0.25f, 0.25f, 1.0f), .fThickness = fLine * 2.0f};
     const plDrawLineOptions tAxisY = {.uColor = PL_COLOR_32_RGBA(0.25f, 0.75f, 0.25f, 1.0f), .fThickness = fLine * 2.0f};
@@ -801,6 +872,8 @@ pl__draw_bridge_frame(plAppData* ptAppData)
     }
 }
 
+/* #========================== Frame State Extraction ========================== */
+
 static plVec3
 pl__get_frame_root(const BridgeFrame* ptFrame)
 {
@@ -808,6 +881,8 @@ pl__get_frame_root(const BridgeFrame* ptFrame)
         return ptFrame->atBodyPos[0];
     return (plVec3){0.0f, 0.0f, 0.0f};
 }
+
+/* #======================= PilotLight App Lifecycle API ====================== */
 
 PL_EXPORT void*
 pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
@@ -837,6 +912,7 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
         ptAppData->bShowGreen = false;
         ptAppData->bShowRed = true;
         ptAppData->bFollowLastSpawn = true;
+        ptAppData->bInferenceContinuityLock = false;
         pl__camera_orbit_from_angles(&ptAppData->tCamera, ptAppData->tOrbitTarget, ptAppData->fOrbitDist);
         return ptAppData;
     }
@@ -853,6 +929,7 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
     ptAppData->bShowGreen = false;
     ptAppData->bShowRed = true;
     ptAppData->bFollowLastSpawn = true;
+    ptAppData->bInferenceContinuityLock = false;
 
     const plExtensionRegistryI* ptExtensionRegistry = pl_get_api_latest(ptApiRegistry, plExtensionRegistryI);
     ptExtensionRegistry->load("pl_unity_ext", NULL, NULL, true);
@@ -938,6 +1015,9 @@ pl_app_resize(plWindow* ptWindow, plAppData* ptAppData)
 PL_EXPORT void
 pl_app_update(plAppData* ptAppData)
 {
+    /* ---------------------------------------------------------------------- */
+    /* Frame begin + packet ingestion                                         */
+    /* ---------------------------------------------------------------------- */
     if(!gptStarter->begin_frame())
         return;
 
@@ -948,6 +1028,10 @@ pl_app_update(plAppData* ptAppData)
         ptAppData->bAutoFollow = !ptAppData->bAutoFollow;
         printf("[bridge] auto-follow: %s\n", ptAppData->bAutoFollow ? "on" : "off");
     }
+
+    /* ---------------------------------------------------------------------- */
+    /* Camera input handling (orbit, yaw, zoom)                               */
+    /* ---------------------------------------------------------------------- */
 
     // --- mouse orbit (left-drag rotates, scroll zooms) ---
     static const float fRotSpeed  = 0.005f;
@@ -988,6 +1072,10 @@ pl_app_update(plAppData* ptAppData)
         ptAppData->fOrbitDist = pl_clampf(0.5f, ptAppData->fOrbitDist * 0.90f, 100.0f);
     else if(fWheel < 0.0f)
         ptAppData->fOrbitDist = pl_clampf(0.5f, ptAppData->fOrbitDist * 1.10f, 100.0f);
+
+    /* ---------------------------------------------------------------------- */
+    /* Per-frame world anchors and camera target update                       */
+    /* ---------------------------------------------------------------------- */
 
     float fGroundZ = 0.0f;
     plVec3 tGridCenter = {0.0f, 0.0f, 0.0f};
@@ -1041,6 +1129,10 @@ pl_app_update(plAppData* ptAppData)
     }
     pl__camera_orbit_from_angles(&ptAppData->tCamera, ptAppData->tOrbitTarget, ptAppData->fOrbitDist);
 
+    /* ---------------------------------------------------------------------- */
+    /* Draw world/grid + frame overlays                                       */
+    /* ---------------------------------------------------------------------- */
+
     pl__draw_ground_grid(ptAppData, tGridCenter, fGroundZ);
 
 
@@ -1067,6 +1159,10 @@ pl_app_update(plAppData* ptAppData)
     }
 
     pl__draw_ui(ptAppData, fGroundZ);
+
+    /* ---------------------------------------------------------------------- */
+    /* Submit render passes + end frame                                       */
+    /* ---------------------------------------------------------------------- */
 
     plIO* ptIO = gptIO->get_io();
     plRenderEncoder* ptEncoder = gptStarter->begin_main_pass();

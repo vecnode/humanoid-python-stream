@@ -161,6 +161,10 @@ class CLoSD(humanoid_im.HumanoidIm):
         self.spawn_anchor_valid = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self.last_finished_root = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
 
+        # A/B switch: continuity bridge at each inference boundary (root XY trajectory).
+        self.inference_continuity_lock = bool(self.cfg['env']['dip'].get('inference_continuity_lock', False))
+        self.inference_continuity_frames = int(self.cfg['env']['dip'].get('inference_continuity_frames', 12))
+
         # Blend first frames of each newly generated horizon with current live pose to avoid pops.
         self.transition_blend_frames = int(self.cfg['env']['dip'].get('transition_blend_frames', 8))
         
@@ -392,6 +396,86 @@ class CLoSD(humanoid_im.HumanoidIm):
                 blend_alpha * planning_horizon[prompt_changed_mask, :blend_frames]
             )
 
+        if self.inference_continuity_lock and planning_horizon.shape[1] > 0:
+            # Continuity lock: hard frame-0 anchor + velocity bridge for first K frames.
+            # Separates prompt switches (hard lock) from periodic refreshes (bridge only).
+            n_envs = planning_horizon.shape[0]
+            bridge_frames = max(1, min(self.inference_continuity_frames, planning_horizon.shape[1]))
+
+            all_env_ids = torch.arange(n_envs, device=planning_horizon.device)
+            before_xy = self._rigid_body_pos[all_env_ids, 0, :2].detach()
+
+            # Get pre-correction root for diagnostics
+            gen_root_xy_pre = planning_horizon[:, 0, 0, :2].detach().clone()
+
+            # Step 1: Hard lock frame 0 to live root for all envs (covers both prompt switches and periodic refreshes).
+            # Ensures frame 0 matches current live root, then bridge smooths early trajectory.
+            planning_horizon[:, 0, :, 0] = before_xy[:, 0]
+            planning_horizon[:, 0, :, 1] = before_xy[:, 1]
+
+            # Step 2: Velocity bridge for early frames (1..K) to smooth transition.
+            if self.pose_buffer.shape[1] >= 2:
+                # Approximate root XY velocity from the latest two buffered frames (SMPL indexing).
+                live_vel_xy = (self.pose_buffer[:, -1, 0, :2] - self.pose_buffer[:, -2, 0, :2]).detach()
+            else:
+                live_vel_xy = torch.zeros((n_envs, 2), dtype=planning_horizon.dtype, device=planning_horizon.device)
+
+            # Extrapolated path from live motion
+            step_idx = torch.arange(bridge_frames, dtype=planning_horizon.dtype, device=planning_horizon.device).view(1, bridge_frames, 1)
+            extrap_root_xy = before_xy[:, None, :] + live_vel_xy[:, None, :] * step_idx
+
+            gen_root_xy = planning_horizon[:, :bridge_frames, 0, :2]
+            bridge_alpha = torch.linspace(
+                0.0,
+                1.0,
+                steps=bridge_frames,
+                device=planning_horizon.device,
+                dtype=planning_horizon.dtype,
+            ).view(1, bridge_frames, 1)
+
+            target_root_xy = (1.0 - bridge_alpha) * extrap_root_xy + bridge_alpha * gen_root_xy
+            delta_root_xy = target_root_xy - gen_root_xy
+
+            planning_horizon[:, :bridge_frames, :, 0] += delta_root_xy[:, :, 0:1]
+            planning_horizon[:, :bridge_frames, :, 1] += delta_root_xy[:, :, 1:2]
+            
+            # Get post-correction root for diagnostics
+            gen_root_xy_post = planning_horizon[:, 0, 0, :2].detach().clone()
+
+        if prompt_changed_mask is not None and torch.any(prompt_changed_mask):
+            changed_env_ids = torch.nonzero(prompt_changed_mask, as_tuple=False).squeeze(-1)
+
+            for env_id_t in changed_env_ids:
+                env_id = int(env_id_t.item())
+
+                # "before" is the currently simulated character root (red dot in the live view).
+                before_root = self._rigid_body_pos[env_id, 0]
+                before_xy = before_root[:2]
+                
+                # "new" is the root at the first frame of the newly planned motion horizon.
+                new_root = planning_horizon[env_id, 0, 0]
+                new_xy = new_root[:2]
+                
+                # Diagnostic: measure pre vs post correction if inference continuity lock is active
+                if self.inference_continuity_lock:
+                    new_xy_pre = gen_root_xy_pre[env_id]
+                    new_xy_post = gen_root_xy_post[env_id]
+                    delta_px = float(new_xy_post[0].item()) - float(new_xy_pre[0].item())
+                    delta_py = float(new_xy_post[1].item()) - float(new_xy_pre[1].item())
+                    error_mag = float(torch.sqrt(torch.tensor(delta_px**2 + delta_py**2)).item())
+                    print(
+                        f"[PROMPT_SWITCH] env={env_id} before x: {float(before_xy[0].item()):.3f}, y: {float(before_xy[1].item()):.3f} | "
+                        f"new x: {float(new_xy[0].item()):.3f}, y: {float(new_xy[1].item()):.3f} | "
+                        f"correction_mag={error_mag:.4f}"
+                    )
+                else:
+                    print(
+                        f"[CHARACTER POSITION] before x: {float(before_root[0].item()):.3f}, y: {float(before_root[1].item()):.3f}"
+                    )
+                    print(
+                        f"[CHARACTER POSITION] new x: {float(new_root[0].item()):.3f}, y: {float(new_root[1].item()):.3f}"
+                    )
+
         return planning_horizon[:, 0], planning_horizon[:, 1:]
     
     
@@ -530,6 +614,9 @@ class CLoSD(humanoid_im.HumanoidIm):
         if action == 'set_spawn_mode':
             self.spawn_follow_last = bool(cmd.get('follow_last', False))
             print(f"[pilotlight] spawn_follow_last={self.spawn_follow_last}")
+        elif action == 'set_inference_continuity_lock':
+            self.inference_continuity_lock = bool(cmd.get('enabled', False))
+            print(f"[pilotlight] inference_continuity_lock={self.inference_continuity_lock}")
         elif action == 'capture_spawn_anchor':
             env_id = int(cmd.get('env_id', 0))
             env_id = int(np.clip(env_id, 0, self.num_envs - 1))
@@ -548,6 +635,7 @@ class CLoSD(humanoid_im.HumanoidIm):
         anchor_xy = self.spawn_anchor_xy[env_id]
         return {
             'spawn_follow_last': bool(self.spawn_follow_last),
+            'inference_continuity_lock': bool(self.inference_continuity_lock),
             'spawn_anchor': [float(anchor_xy[0].item()), float(anchor_xy[1].item()), ground_z],
             'world_center': [0.0, 0.0, ground_z],
         }
