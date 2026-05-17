@@ -42,27 +42,66 @@ This project expects these folders at the root level:
 - isaacgym
 - pilotlight_integration
 
-### 3. Create and populate the Python environment
+
+
+
+## Install
+
+Two environments are required because IsaacGym ships pre-compiled binaries **only for Python 3.6–3.8**, while VibeVoice requires **Python ≥ 3.10**. They cannot share one interpreter.
+
+| Environment | Python | Purpose |
+|---|---|---|
+| `conda closd` | **3.8** | IsaacGym · CLoSD · DiP · RL policy · SMPL · BERT |
+| `.venv` | **3.10+** | VibeVoice audio worker (separate process) |
+
+The launch script starts both automatically. Only `closd` needs to be active when you run it.
+
+### 1. Create the conda environment (Python 3.8 — sim + all models)
 
 ```bash
-conda create -n closd python=3.8 -y
+conda env create -f environment.yml   # creates env named "closd"
 conda activate closd
-
-# CLoSD python deps
-pip install -r CLoSD/requirement.txt
-
-# Isaac Gym python package
-pip install -e isaacgym/python
 ```
 
-### 4. Prepare scripts
+Then install the three packages that require local source or CUDA headers:
 
 ```bash
-chmod +x pilotlight_integration/pilotlight_app/build_bridge_viewer.sh
-chmod +x pilotlight_integration/pilotlight_app/run_bridge_viewer.sh
-chmod +x pilotlight_integration/launch_closd_pilotlight.sh
-chmod +x pilotlight_integration/sync_closd_overlay.sh
+# IsaacGym — download the .tar.gz from https://developer.nvidia.com/isaac-gym,
+# extract it, then install the bundled wheel:
+pip install isaacgym/python/
+
+# If launch later fails with missing gymtorch.cpp, link IsaacGym sources:
+ln -sfn "$PWD/isaacgym/python/isaacgym/_bindings/src" \
+        "$CONDA_PREFIX/lib/python3.8/site-packages/isaacgym/_bindings/src"
+
+# pytorch3d — build from source. Ensure nvcc matches torch CUDA (torch=cu121 here):
+export CUDA_HOME=/usr/local/cuda-12
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+nvcc --version  # should report CUDA 12.x (not 11.x)
+pip install "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.9"
+
+# CLIP:
+pip install git+https://github.com/openai/CLIP.git
 ```
+
+### 2. Create the audio venv (Python 3.10+ — VibeVoice only)
+
+```bash
+conda deactivate
+python3.10 -m venv .venv
+.venv/bin/pip install -r audio_runtime/requirements_worker.txt
+
+# Optional — enables vibevoice's fast CUDA path (requires CUDA headers):
+.venv/bin/pip install flash-attn --no-build-isolation
+```
+
+The launch script detects `.venv/bin/python` automatically. If the venv is absent, the system runs without audio and logs a skip message.
+
+
+
+
+
 
 ### 5. Build the PilotLight bridge viewer
 
@@ -102,8 +141,9 @@ The launcher runs pilotlight_integration/sync_closd_overlay.sh before starting C
 | BERT text encoder | `distilbert-base-uncased` via HuggingFace cache (`~/.cache/huggingface/`) | Encodes the text prompt into an embedding that conditions DiP |
 
 
-
 ## AI DSP
+
+### Global Architecture
 
 The runtime behaves like a continuous AI DSP loop: prompts are streamed in, transformed into motion plans, stabilized by physics control, and rendered by the PilotLight viewer while new prompts keep updating intent.
 
@@ -155,4 +195,19 @@ flowchart LR
         classDef model fill:#f4f4f4,stroke:#bbb,color:#555,font-size:11px
         classDef default rx:6
 ```
+
+### DiP Diffusion Planner
+
+Lorem ipsum
+
+### RL Humanoid
+
+Lorem ipsum
+
+### Audio Runtime 
+
+
+VibeVoice-Realtime is a lightweight real‑time text-to-speech model supporting streaming text input and robust long-form speech generation. It can be used to build realtime TTS services, narrate live data streams, and let different LLMs start speaking from their very first tokens (plug in your preferred model) long before a full answer is generated. It produces initial audible speech in ~300 ms (hardware dependent).
+
+https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B
 

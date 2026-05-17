@@ -57,8 +57,26 @@ cleanup() {
   if [[ -n "${VIEWER_PID}" && ${KEEP_VIEWER} -eq 0 ]]; then
     kill "${VIEWER_PID}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${AUDIO_WORKER_PID:-}" ]]; then
+    kill "${AUDIO_WORKER_PID}" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT INT TERM
+
+# ── Audio worker (VibeVoice, Python 3.10+ / .venv) ─────────────────────────
+AUDIO_PYTHON="${ROOT_DIR}/.venv/bin/python"
+AUDIO_WORKER_PID=""
+if [[ -x "${AUDIO_PYTHON}" ]]; then
+  "${AUDIO_PYTHON}" -m audio_runtime.worker \
+    --model "microsoft/VibeVoice-Realtime-0.5B" \
+    --device "cuda:0" \
+    --output-dir "/tmp/mixed-motion-audio" \
+    > /tmp/audio_worker.log 2>&1 &
+  AUDIO_WORKER_PID=$!
+  echo "audio worker started pid=${AUDIO_WORKER_PID} log=/tmp/audio_worker.log"
+else
+  echo "audio worker skipped (.venv not found — see audio_runtime/requirements_worker.txt)"
+fi
 
 if [[ -f "${ROOT_DIR}/CLoSD/closd/run.py" ]]; then
   if [[ -n "${CONDA_PREFIX:-}" && -d "${CONDA_PREFIX}/lib" ]]; then
