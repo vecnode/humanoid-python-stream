@@ -45,7 +45,7 @@ This project expects these folders at the root level:
 
 
 
-## Install
+## First Install
 
 Two environments are required because IsaacGym ships pre-compiled binaries **only for Python 3.6–3.8**, while VibeVoice requires **Python ≥ 3.10**. They cannot share one interpreter.
 
