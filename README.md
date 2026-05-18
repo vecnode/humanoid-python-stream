@@ -196,15 +196,135 @@ flowchart LR
         classDef default rx:6
 ```
 
+### DiP and RL Closed Loop
+
+This diagram shows how text conditioned planning and physics control operate as one loop during runtime. The next two sections then zoom into each side separately.
+
+```mermaid
+flowchart LR
+        I0[Pipeline input<br/>user prompt stream] --> T
+        T[Prompt text input] --> E[Text embedding]
+        E --> P[DiP planner]
+        P --> H[Predicted motion horizon]
+
+        H --> R[RL tracking policy]
+        R --> S[Isaac Gym simulation]
+        S --> X[Live humanoid state]
+
+        X --> O[Imitation observations]
+        H --> O
+        O --> R
+
+        X --> W[Imitation reward]
+        H --> W
+        W --> R
+
+        S --> C[Pose context buffer]
+        C --> P
+
+        X --> O0[Pipeline outputs<br/>viewer state stream and control state]
+        H --> O1[Planner output contract<br/>next target pose and horizon]
+```
+
 ### DiP Diffusion Planner
 
-Lorem ipsum
+The DiP planner runs as a prefix-completion diffusion pipeline inside the CLoSD task. At each planning boundary, it builds context from recent simulated pose, conditions on the current text prompt, samples a horizon in HumanML space, converts back to SMPL XYZ, and returns the next planning window for tracking.
+
+```mermaid
+flowchart LR
+        I1[Inputs from closed loop<br/>prompt text and pose context buffer] --> A
+        A[Sim pose buffer<br/>pose_buffer @ 30 FPS] --> B[build_completion_input<br/>pose_to_hml + prefix/mask]
+        P[Prompt list<br/>hml_prompts] --> C[get_text_prompts]
+        C --> D[text cache check]
+        D -->|changed| E[mdm.encode_text]
+        D -->|unchanged| F[reuse cached text_embed]
+        E --> G[model_kwargs.y]
+        F --> G
+        B --> G
+
+        G --> H[diffusion.p_sample_loop<br/>sample_fn]
+        H --> I[cur_mdm_pred<br/>HumanML sample]
+        I --> J[rep.hml_to_pose<br/>20 FPS -> 30 FPS]
+        J --> K[extract planning_horizon]
+        K --> L[transition blending<br/>prompt-switch smoothing]
+        L --> M[inference continuity lock<br/>root XY bridge]
+        M --> N[get_pred_pose returns<br/>j3d + optional j3d_prev]
+
+        N --> O2[Output to RL graph<br/>reference pose packet for tracking]
+        K --> O3[Output to bridge graph<br/>predicted horizon for visualization]
+```
+
+Implementation anchors: `CLoSD.get_mdm_next_planning_horizon`, `CLoSD.build_completion_input`, `RepresentationHandler.hml_to_pose`, and `CLoSD.get_pred_pose`.
 
 ### RL Humanoid
 
-Lorem ipsum
+The RL humanoid loop uses AMP-style policy control in Isaac Gym. The policy acts each step, simulation advances physics, then imitation observations/rewards are computed against DiP-generated reference pose and velocity.
+
+```mermaid
+flowchart LR
+        I2[Inputs from DiP graph<br/>reference pose packet and horizon] --> G
+        A[Policy step<br/>AMPAgent play_steps_rnn] --> B[Environment step<br/>env_step with actions]
+        B --> C[Pre physics step<br/>HumanoidAMP pre_physics_step]
+        C --> D[Isaac Gym simulation]
+        D --> E[Post physics step<br/>CLoSD post_physics_step]
+        E --> F[Pose buffer update and frame index advance]
+
+        G[Planner query<br/>get_pred_pose] --> H[Generated reference state<br/>get_state_from_gen_cache]
+        H --> I[Reference tensors<br/>ref rb pos and ref body vel]
+        I --> J[Task observation build<br/>compute_task_obs_demo]
+        D --> J
+        J --> K[Imitation observation kernel<br/>compute_imitation_observations_v7]
+        K --> L[Task observation output]
+
+        D --> M[Imitation reward kernel<br/>compute_imitation_reward_wo_rot]
+        I --> M
+        M --> N[Reward output<br/>reward and reward_raw]
+
+        L --> O[Next observation package]
+        N --> O
+        O --> A
+
+        D --> O4[Outputs to global runtime<br/>rigid body state and simulation dt]
+        D --> O5[Output to audio graph<br/>text trigger path via runtime client]
+```
+
+This closes the tracking loop: planner predictions become reference motion, and the RL controller is rewarded for matching body position and velocity while maintaining stable simulation.
 
 ### Audio Runtime 
+
+Audio is intentionally split into two Python processes: CLoSD (3.8) remains in the simulation environment, while a dedicated worker (.venv, 3.10+) owns VibeVoice and serves synthesis over localhost TCP.
+
+```mermaid
+flowchart LR
+        I3[Inputs from runtime graphs<br/>text command and worker endpoint] --> L
+        subgraph S[Launcher]
+                L[launch_closd_pilotlight.sh]
+        end
+
+        subgraph C[CLoSD Process - Python 3.8]
+                R[initialize_audio_runtime]
+                RT[AudioRuntime client]
+        end
+
+        subgraph W[Audio Worker - Python 3.10+]
+                WS[AudioWorkerServer<br/>TCP 127.0.0.1:45679]
+                M[VibeVoice model + processor]
+                SY[Synthesize text job]
+                WAV[Wave file output in tmp directory]
+        end
+
+        L -->|spawn .venv/bin/python -m audio_runtime.worker| WS
+        L -->|wait_for_tcp_ready| WS
+        C -->|startup| R -->|ping| WS
+        WS -->|pong ready=true| RT
+        RT -->|synthesize text cmd| WS
+        WS --> M --> SY --> WAV
+
+        WAV --> O6[Audio output contract<br/>wave files available for playback]
+        RT --> O7[Runtime status output<br/>ready or degraded optional]
+```
+
+Current behavior is text-driven synthesis over the socket protocol (`ping`, `synthesize`, `shutdown`). Pose/phase arguments are accepted by the CLoSD-side API for forward compatibility, but are not yet streamed to the worker.
 
 
 VibeVoice-Realtime is a lightweight real‑time text-to-speech model supporting streaming text input and robust long-form speech generation. It can be used to build realtime TTS services, narrate live data streams, and let different LLMs start speaking from their very first tokens (plug in your preferred model) long before a full answer is generated. It produces initial audible speech in ~300 ms (hardware dependent).
