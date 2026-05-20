@@ -167,6 +167,30 @@ class CLoSD(humanoid_im.HumanoidIm):
 
         # Blend first frames of each newly generated horizon with current live pose to avoid pops.
         self.transition_blend_frames = int(self.cfg['env']['dip'].get('transition_blend_frames', 8))
+
+        # A/B smoothing mode for replan seams (runtime-toggle via PilotLight control).
+        self.seam_smoothing_mode = bool(self.cfg['env']['dip'].get('seam_smoothing_mode', False))
+        self.same_prompt_blend_frames = int(self.cfg['env']['dip'].get('same_prompt_blend_frames', 4))
+        self.full_body_continuity_blend = bool(self.cfg['env']['dip'].get('full_body_continuity_blend', True))
+
+        # Optional prompt debounce for A/B mode to suppress prompt-churn seams.
+        self.prompt_debounce_enabled = bool(self.cfg['env']['dip'].get('prompt_debounce_enabled', False))
+        self.prompt_debounce_replans = max(1, int(self.cfg['env']['dip'].get('prompt_debounce_replans', 2)))
+        self._active_text_prompts = None
+        self._pending_text_prompts = None
+        self._pending_text_replans = 0
+
+        # Quantitative seam metric for A/B tests (updated at each replan).
+        self.last_seam_jump_m = 0.0
+        self.last_seam_jump_raw_m = 0.0
+        self.last_seam_replan_frame = -1
+
+        # Runtime diagnostics for A/B evaluation.
+        self.prompt_switch_count = 0
+        self.last_prompt_switch_frame = -1
+        self.reset_count = 0
+        self.last_reset_frame = -1
+        self.last_reset_envs = 0
         
     def init_save_hml_episodes(self):
         save_motions = self.cfg['env'].get('save_motion', {})
@@ -300,6 +324,39 @@ class CLoSD(humanoid_im.HumanoidIm):
             return self.hml_prompts
         else:  # get prompts from dataset
             raise ValueError('prompts must be specified, this mode is no longer supported.')
+
+    def _get_debounced_text_prompts(self, raw_text_prompts):
+        # Keep baseline behavior unchanged unless A/B smoothing + debounce are enabled.
+        if not (self.seam_smoothing_mode and self.prompt_debounce_enabled):
+            self._active_text_prompts = tuple(raw_text_prompts)
+            self._pending_text_prompts = None
+            self._pending_text_replans = 0
+            return self._active_text_prompts
+
+        raw = tuple(raw_text_prompts)
+        if self._active_text_prompts is None:
+            self._active_text_prompts = raw
+            self._pending_text_prompts = None
+            self._pending_text_replans = 0
+            return self._active_text_prompts
+
+        if raw == self._active_text_prompts:
+            self._pending_text_prompts = None
+            self._pending_text_replans = 0
+            return self._active_text_prompts
+
+        if self._pending_text_prompts == raw:
+            self._pending_text_replans += 1
+        else:
+            self._pending_text_prompts = raw
+            self._pending_text_replans = 1
+
+        if self._pending_text_replans >= self.prompt_debounce_replans:
+            self._active_text_prompts = raw
+            self._pending_text_prompts = None
+            self._pending_text_replans = 0
+
+        return self._active_text_prompts
     
     def get_mdm_next_planning_horizon(self):
 
@@ -312,7 +369,8 @@ class CLoSD(humanoid_im.HumanoidIm):
         
         # Build MDM inputs
         model_kwargs = {'y': {}}
-        model_kwargs['y']['text'] = self.get_text_prompts()
+        raw_text_prompts = self.get_text_prompts()
+        model_kwargs['y']['text'] = list(self._get_debounced_text_prompts(raw_text_prompts))
         # Cache text embeddings to avoid repeated BERT work in the viewer thread.
         text_prompts = tuple(model_kwargs['y']['text'])
         prev_text_prompts = getattr(self, '_cached_text_prompts', None)
@@ -320,6 +378,8 @@ class CLoSD(humanoid_im.HumanoidIm):
         if text_prompts_changed:
             self._cached_text_prompts = text_prompts
             self._cached_text_embed = self.mdm.encode_text(model_kwargs['y']['text'])
+            self.prompt_switch_count += 1
+            self.last_prompt_switch_frame = int(self.frame_idx)
         model_kwargs['y']['text_embed'] = self._cached_text_embed
         model_kwargs['y'].update(aux_entries)
         init_image = None
@@ -365,6 +425,7 @@ class CLoSD(humanoid_im.HumanoidIm):
         # Extract the planning horizon
         context_len_30fps = model_kwargs['y']['prefix_len'] * 30 // 20
         planning_horizon = sample_xyz[:, context_len_30fps-1:context_len_30fps+self.planning_horizon_30fps]  # [x, -z, y]
+        planning_horizon_pre_smoothing = planning_horizon[:, 0].detach().clone()
 
         blend_frames = max(0, min(self.transition_blend_frames, planning_horizon.shape[1]))
         prompt_changed_mask = None
@@ -382,19 +443,39 @@ class CLoSD(humanoid_im.HumanoidIm):
                     device=planning_horizon.device,
                 )
 
-        if blend_frames > 0 and prompt_changed_mask is not None and torch.any(prompt_changed_mask):
+        if prompt_changed_mask is None:
+            prompt_changed_mask = torch.zeros(
+                (planning_horizon.shape[0],),
+                dtype=torch.bool,
+                device=planning_horizon.device,
+            )
+
+        def _apply_pose_blend(mask, n_frames):
+            n_frames = max(0, min(int(n_frames), planning_horizon.shape[1]))
+            if n_frames == 0 or mask is None or not torch.any(mask):
+                return
+
             # planning_horizon is in SMPL joint order; map live rigid-body pose to SMPL before blending.
-            live_pose = self._rigid_body_pos[prompt_changed_mask][:, mujoco_2_smpl].detach()
+            live_pose = self._rigid_body_pos[mask][:, mujoco_2_smpl].detach()
             blend_alpha = torch.linspace(
                 0.0,
                 1.0,
-                steps=blend_frames + 1,
+                steps=n_frames + 1,
                 device=planning_horizon.device,
-                dtype=planning_horizon.dtype)[1:].view(1, blend_frames, 1, 1)
-            planning_horizon[prompt_changed_mask, :blend_frames] = (
+                dtype=planning_horizon.dtype)[1:].view(1, n_frames, 1, 1)
+            planning_horizon[mask, :n_frames] = (
                 (1.0 - blend_alpha) * live_pose[:, None] +
-                blend_alpha * planning_horizon[prompt_changed_mask, :blend_frames]
+                blend_alpha * planning_horizon[mask, :n_frames]
             )
+
+        if self.seam_smoothing_mode:
+            # Apply seam smoothing on every replan boundary, not only prompt changes.
+            _apply_pose_blend(prompt_changed_mask, self.transition_blend_frames)
+            same_prompt_mask = torch.logical_not(prompt_changed_mask)
+            _apply_pose_blend(same_prompt_mask, self.same_prompt_blend_frames)
+        else:
+            # Baseline behavior: blend only on prompt switches.
+            _apply_pose_blend(prompt_changed_mask, blend_frames)
 
         if self.inference_continuity_lock and planning_horizon.shape[1] > 0:
             # Continuity lock: hard frame-0 anchor + velocity bridge for first K frames.
@@ -438,6 +519,30 @@ class CLoSD(humanoid_im.HumanoidIm):
 
             planning_horizon[:, :bridge_frames, :, 0] += delta_root_xy[:, :, 0:1]
             planning_horizon[:, :bridge_frames, :, 1] += delta_root_xy[:, :, 1:2]
+
+            if self.seam_smoothing_mode and self.full_body_continuity_blend and self.pose_buffer.shape[1] >= 2:
+                # Full-body continuity bridge: damp joint-level discontinuities across replans.
+                live_pose_smpl = self._rigid_body_pos[:, mujoco_2_smpl].detach()
+                live_vel_smpl = (self.pose_buffer[:, -1] - self.pose_buffer[:, -2])[:, mujoco_2_smpl].detach()
+
+                step_idx_full = torch.arange(
+                    bridge_frames,
+                    dtype=planning_horizon.dtype,
+                    device=planning_horizon.device,
+                ).view(1, bridge_frames, 1, 1)
+                extrap_pose = live_pose_smpl[:, None] + live_vel_smpl[:, None] * step_idx_full
+
+                gen_pose = planning_horizon[:, :bridge_frames]
+                bridge_alpha_full = torch.linspace(
+                    0.0,
+                    1.0,
+                    steps=bridge_frames,
+                    device=planning_horizon.device,
+                    dtype=planning_horizon.dtype,
+                ).view(1, bridge_frames, 1, 1)
+
+                target_pose = (1.0 - bridge_alpha_full) * extrap_pose + bridge_alpha_full * gen_pose
+                planning_horizon[:, :bridge_frames] = target_pose
             
             # Get post-correction root for diagnostics
             gen_root_xy_post = planning_horizon[:, 0, 0, :2].detach().clone()
@@ -475,6 +580,18 @@ class CLoSD(humanoid_im.HumanoidIm):
                     print(
                         f"[CHARACTER POSITION] new x: {float(new_root[0].item()):.3f}, y: {float(new_root[1].item()):.3f}"
                     )
+
+        # Quantitative seam metric: root XY jump magnitude before vs after smoothing.
+        live_root_xy = self._rigid_body_pos[:, 0, :2].detach()
+        raw_root_xy = planning_horizon_pre_smoothing[:, 0, :2]
+        post_root_xy = planning_horizon[:, 0, 0, :2].detach()
+
+        seam_raw = torch.norm(raw_root_xy - live_root_xy, dim=-1)
+        seam_post = torch.norm(post_root_xy - live_root_xy, dim=-1)
+
+        self.last_seam_jump_raw_m = float(seam_raw.mean().item())
+        self.last_seam_jump_m = float(seam_post.mean().item())
+        self.last_seam_replan_frame = int(self.frame_idx)
 
         return planning_horizon[:, 0], planning_horizon[:, 1:]
     
@@ -571,6 +688,9 @@ class CLoSD(humanoid_im.HumanoidIm):
     
     def _reset_envs(self, env_ids):
         if len(env_ids) > 0:
+            self.reset_count += int(len(env_ids))
+            self.last_reset_frame = int(self.frame_idx)
+            self.last_reset_envs = int(len(env_ids))
             self.last_finished_root[env_ids] = self._rigid_body_pos[env_ids, 0].detach().clone()
             if self.spawn_follow_last:
                 self.spawn_anchor_xy[env_ids] = self.last_finished_root[env_ids, :2]
@@ -617,6 +737,14 @@ class CLoSD(humanoid_im.HumanoidIm):
         elif action == 'set_inference_continuity_lock':
             self.inference_continuity_lock = bool(cmd.get('enabled', False))
             print(f"[pilotlight] inference_continuity_lock={self.inference_continuity_lock}")
+        elif action == 'set_seam_smoothing_mode':
+            self.seam_smoothing_mode = bool(cmd.get('enabled', False))
+            print(f"[pilotlight] seam_smoothing_mode={self.seam_smoothing_mode}")
+        elif action == 'set_character_wrapper_enabled':
+            enabled = bool(cmd.get('enabled', False))
+            if hasattr(self, '_character_wrapper') and self._character_wrapper is not None:
+                self._character_wrapper.enabled = enabled
+            print(f"[pilotlight] character_wrapper_enabled={enabled}")
         elif action == 'capture_spawn_anchor':
             env_id = int(cmd.get('env_id', 0))
             env_id = int(np.clip(env_id, 0, self.num_envs - 1))
@@ -629,6 +757,9 @@ class CLoSD(humanoid_im.HumanoidIm):
     def get_pilotlight_overlay_state(self, env_id):
         env_id = int(np.clip(env_id, 0, self.num_envs - 1))
         ground_z = 0.0
+        wrapper_enabled = False
+        if hasattr(self, '_character_wrapper') and self._character_wrapper is not None:
+            wrapper_enabled = bool(self._character_wrapper.enabled)
         if self._rigid_body_pos.shape[1] > 0:
             ground_z = float(self._rigid_body_pos[env_id, :, 2].min().item())
 
@@ -636,6 +767,17 @@ class CLoSD(humanoid_im.HumanoidIm):
         return {
             'spawn_follow_last': bool(self.spawn_follow_last),
             'inference_continuity_lock': bool(self.inference_continuity_lock),
+            'seam_smoothing_mode': bool(self.seam_smoothing_mode),
+            'character_wrapper_enabled': wrapper_enabled,
+            'seam_jump_m': float(self.last_seam_jump_m),
+            'seam_jump_raw_m': float(self.last_seam_jump_raw_m),
+            'seam_replan_frame': int(self.last_seam_replan_frame),
+            'prompt_switch_count': int(self.prompt_switch_count),
+            'last_prompt_switch_frame': int(self.last_prompt_switch_frame),
+            'reset_count': int(self.reset_count),
+            'last_reset_frame': int(self.last_reset_frame),
+            'last_reset_envs': int(self.last_reset_envs),
+            'prompt_debounce_pending_replans': int(self._pending_text_replans),
             'spawn_anchor': [float(anchor_xy[0].item()), float(anchor_xy[1].item()), ground_z],
             'world_center': [0.0, 0.0, ground_z],
         }

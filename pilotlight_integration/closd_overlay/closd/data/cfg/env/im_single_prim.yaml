@@ -93,4 +93,6 @@ viewer:
   bridge_publish_every_n_steps: 1
   bridge_include_rot: True
   bridge_include_predicted: True
+  bridge_character_wrapper_enabled: False
+  bridge_character_wrapper_map: assets/character3_smpl24_wrapper.json
 

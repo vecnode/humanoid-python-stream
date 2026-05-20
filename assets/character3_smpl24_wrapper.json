@@ -1,0 +1,172 @@
+{
+  "source_fbx": "/home/luisarandas/Desktop/mixed-motion/assets/character3.fbx",
+  "smpl24_order": [
+    "Pelvis",
+    "L_Hip",
+    "R_Hip",
+    "Torso",
+    "L_Knee",
+    "R_Knee",
+    "Spine",
+    "L_Ankle",
+    "R_Ankle",
+    "Chest",
+    "L_Toe",
+    "R_Toe",
+    "Neck",
+    "L_Thorax",
+    "R_Thorax",
+    "Head",
+    "L_Shoulder",
+    "R_Shoulder",
+    "L_Elbow",
+    "R_Elbow",
+    "L_Wrist",
+    "R_Wrist",
+    "L_Hand",
+    "R_Hand"
+  ],
+  "mapping": {
+    "Pelvis": {
+      "type": "bone",
+      "name": "Root"
+    },
+    "L_Hip": {
+      "type": "bone",
+      "name": "thigh.L"
+    },
+    "R_Hip": {
+      "type": "bone",
+      "name": "thigh.R"
+    },
+    "Torso": {
+      "type": "bone",
+      "name": "spine.001"
+    },
+    "L_Knee": {
+      "type": "bone",
+      "name": "shin.L"
+    },
+    "R_Knee": {
+      "type": "bone",
+      "name": "shin.R"
+    },
+    "Spine": {
+      "type": "bone",
+      "name": "spine.002"
+    },
+    "L_Ankle": {
+      "type": "bone",
+      "name": "foot.L"
+    },
+    "R_Ankle": {
+      "type": "bone",
+      "name": "foot.R"
+    },
+    "Chest": {
+      "type": "bone",
+      "name": "spine.003"
+    },
+    "L_Toe": {
+      "type": "bone",
+      "name": "toe.L"
+    },
+    "R_Toe": {
+      "type": "bone",
+      "name": "toe.R"
+    },
+    "Neck": {
+      "type": "bone",
+      "name": "spine.005"
+    },
+    "L_Thorax": {
+      "type": "bone",
+      "name": "shoulder.L"
+    },
+    "R_Thorax": {
+      "type": "bone",
+      "name": "shoulder.R"
+    },
+    "Head": {
+      "type": "bone",
+      "name": "spine.006"
+    },
+    "L_Shoulder": {
+      "type": "bone",
+      "name": "upper_arm.L"
+    },
+    "R_Shoulder": {
+      "type": "bone",
+      "name": "upper_arm.R"
+    },
+    "L_Elbow": {
+      "type": "bone",
+      "name": "forearm.L"
+    },
+    "R_Elbow": {
+      "type": "bone",
+      "name": "forearm.R"
+    },
+    "L_Wrist": {
+      "type": "midpoint",
+      "a": "forearm.L",
+      "b": "hand.L",
+      "fallback": "hand.L"
+    },
+    "R_Wrist": {
+      "type": "midpoint",
+      "a": "forearm.R",
+      "b": "hand.R",
+      "fallback": "hand.R"
+    },
+    "L_Hand": {
+      "type": "bone",
+      "name": "hand.L"
+    },
+    "R_Hand": {
+      "type": "bone",
+      "name": "hand.R"
+    }
+  },
+  "unresolved_joints": [],
+  "candidate_tokens_count": 33,
+  "candidate_tokens": [
+    "C..R",
+    "Root",
+    "ShininessExponentS",
+    "ShininessS",
+    "breast.L",
+    "breast.R",
+    "foot.L",
+    "foot.R",
+    "forearm.L",
+    "forearm.R",
+    "hand.L",
+    "hand.R",
+    "heel.02.L",
+    "heel.02.R",
+    "pelvis.L",
+    "pelvis.R",
+    "shin.L",
+    "shin.R",
+    "shoulder.L",
+    "shoulder.R",
+    "spine",
+    "spine.001",
+    "spine.002",
+    "spine.003",
+    "spine.004",
+    "spine.005",
+    "spine.006",
+    "thigh.L",
+    "thigh.R",
+    "toe.L",
+    "toe.R",
+    "upper_arm.L",
+    "upper_arm.R"
+  ],
+  "notes": [
+    "Auto-generated using FBX string heuristics.",
+    "Validate in Blender before production export."
+  ]
+}

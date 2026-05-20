@@ -91,6 +91,21 @@ typedef struct _BridgeFrame
     bool     bHasWorldCenter;
     plVec3   tWorldCenter;
     bool     bSpawnFollowLast;
+    bool     bHasInferenceContinuityLock;
+    bool     bInferenceContinuityLock;
+    bool     bHasSeamSmoothingMode;
+    bool     bSeamSmoothingMode;
+    bool     bHasCharacterWrapperEnabled;
+    bool     bCharacterWrapperEnabled;
+    float    fSeamJumpM;
+    float    fSeamJumpRawM;
+    int32_t  iSeamReplanFrame;
+    int32_t  iPromptSwitchCount;
+    int32_t  iLastPromptSwitchFrame;
+    int32_t  iResetCount;
+    int32_t  iLastResetFrame;
+    int32_t  iLastResetEnvs;
+    int32_t  iPromptDebouncePendingReplans;
 
     char acPrompt[MAX_PROMPT_CHARS];
 } BridgeFrame;
@@ -108,6 +123,8 @@ typedef struct _plAppData
     bool bAutoFollow;
     bool bFollowLastSpawn;
     bool bInferenceContinuityLock;
+    bool bSeamSmoothingMode;
+    bool bCharacterWrapperEnabled;
 
     // orbit camera
     plVec3 tOrbitTarget;
@@ -406,6 +423,30 @@ pl__send_inference_continuity_lock(plAppData* ptAppData)
     pl__send_control_json(ptAppData, acPayload);
 }
 
+static void
+pl__send_seam_smoothing_mode(plAppData* ptAppData)
+{
+    char acPayload[128] = {0};
+    snprintf(
+        acPayload,
+        sizeof(acPayload),
+        "{\"action\":\"set_seam_smoothing_mode\",\"enabled\":%s}",
+        ptAppData->bSeamSmoothingMode ? "true" : "false");
+    pl__send_control_json(ptAppData, acPayload);
+}
+
+static void
+pl__send_character_wrapper_enabled(plAppData* ptAppData)
+{
+    char acPayload[128] = {0};
+    snprintf(
+        acPayload,
+        sizeof(acPayload),
+        "{\"action\":\"set_character_wrapper_enabled\",\"enabled\":%s}",
+        ptAppData->bCharacterWrapperEnabled ? "true" : "false");
+    pl__send_control_json(ptAppData, acPayload);
+}
+
 /* #============================ JSON Parse Helpers ============================ */
 
 static void
@@ -522,6 +563,24 @@ pl__parse_bridge_packet(const char* pcJson, BridgeFrame* ptFrame)
     tTmp.bHasSpawnAnchor = false;
     tTmp.bHasWorldCenter = false;
     tTmp.bSpawnFollowLast = pl_json_bool_member(ptRoot, "spawn_follow_last", false);
+    tTmp.bHasInferenceContinuityLock = (pl_json_member(ptRoot, "inference_continuity_lock") != NULL);
+    tTmp.bHasSeamSmoothingMode = (pl_json_member(ptRoot, "seam_smoothing_mode") != NULL);
+    tTmp.bHasCharacterWrapperEnabled = (pl_json_member(ptRoot, "character_wrapper_enabled") != NULL);
+    if(tTmp.bHasInferenceContinuityLock)
+        tTmp.bInferenceContinuityLock = pl_json_bool_member(ptRoot, "inference_continuity_lock", false);
+    if(tTmp.bHasSeamSmoothingMode)
+        tTmp.bSeamSmoothingMode = pl_json_bool_member(ptRoot, "seam_smoothing_mode", false);
+    if(tTmp.bHasCharacterWrapperEnabled)
+        tTmp.bCharacterWrapperEnabled = pl_json_bool_member(ptRoot, "character_wrapper_enabled", false);
+    tTmp.fSeamJumpM = pl_json_float_member(ptRoot, "seam_jump_m", 0.0f);
+    tTmp.fSeamJumpRawM = pl_json_float_member(ptRoot, "seam_jump_raw_m", 0.0f);
+    tTmp.iSeamReplanFrame = pl_json_int_member(ptRoot, "seam_replan_frame", -1);
+    tTmp.iPromptSwitchCount = pl_json_int_member(ptRoot, "prompt_switch_count", 0);
+    tTmp.iLastPromptSwitchFrame = pl_json_int_member(ptRoot, "last_prompt_switch_frame", -1);
+    tTmp.iResetCount = pl_json_int_member(ptRoot, "reset_count", 0);
+    tTmp.iLastResetFrame = pl_json_int_member(ptRoot, "last_reset_frame", -1);
+    tTmp.iLastResetEnvs = pl_json_int_member(ptRoot, "last_reset_envs", 0);
+    tTmp.iPromptDebouncePendingReplans = pl_json_int_member(ptRoot, "prompt_debounce_pending_replans", 0);
     pl__parse_optional_vec3_member(ptRoot, "spawn_anchor", &tTmp.tSpawnAnchor, &tTmp.bHasSpawnAnchor);
     pl__parse_optional_vec3_member(ptRoot, "world_center", &tTmp.tWorldCenter, &tTmp.bHasWorldCenter);
 
@@ -580,6 +639,13 @@ pl__poll_bridge_socket(plAppData* ptAppData)
 
             ptAppData->tFrame = tFrame;
             ptAppData->bHasFrame = true;
+            ptAppData->bFollowLastSpawn = tFrame.bSpawnFollowLast;
+            if(tFrame.bHasInferenceContinuityLock)
+                ptAppData->bInferenceContinuityLock = tFrame.bInferenceContinuityLock;
+            if(tFrame.bHasSeamSmoothingMode)
+                ptAppData->bSeamSmoothingMode = tFrame.bSeamSmoothingMode;
+            if(tFrame.bHasCharacterWrapperEnabled)
+                ptAppData->bCharacterWrapperEnabled = tFrame.bCharacterWrapperEnabled;
             ptAppData->uPacketsParsed++;
 
             if(ptAppData->uPacketsParsed <= 3 || (ptAppData->uPacketsParsed % 120ull) == 0ull)
@@ -716,6 +782,36 @@ pl__draw_ui(plAppData* ptAppData, float fGroundZ)
             ptAppData->bInferenceContinuityLock = !ptAppData->bInferenceContinuityLock;
             pl__send_inference_continuity_lock(ptAppData);
         }
+
+        gptUI->labeled_text("Seam Smoothing A/B", "%s",
+            ptAppData->bSeamSmoothingMode ? "ON (same prompt blend + full body continuity)" : "OFF (baseline)");
+        if(gptUI->button("Toggle Seam Smoothing"))
+        {
+            ptAppData->bSeamSmoothingMode = !ptAppData->bSeamSmoothingMode;
+            pl__send_seam_smoothing_mode(ptAppData);
+        }
+
+        gptUI->labeled_text("Character Wrapper", "%s",
+            ptAppData->bCharacterWrapperEnabled ? "ON (character_joints published)" : "OFF (disabled)");
+        if(gptUI->button("Toggle Character Load"))
+        {
+            ptAppData->bCharacterWrapperEnabled = !ptAppData->bCharacterWrapperEnabled;
+            pl__send_character_wrapper_enabled(ptAppData);
+        }
+
+        gptUI->labeled_text("Seam jump", "post %.3f m  raw %.3f m",
+            ptAppData->tFrame.fSeamJumpM,
+            ptAppData->tFrame.fSeamJumpRawM);
+        gptUI->labeled_text("Seam frame", "%d", ptAppData->tFrame.iSeamReplanFrame);
+        gptUI->labeled_text("Prompt switches", "%d  last frame %d",
+            ptAppData->tFrame.iPromptSwitchCount,
+            ptAppData->tFrame.iLastPromptSwitchFrame);
+        gptUI->labeled_text("Resets", "%d  last frame %d  envs %d",
+            ptAppData->tFrame.iResetCount,
+            ptAppData->tFrame.iLastResetFrame,
+            ptAppData->tFrame.iLastResetEnvs);
+        gptUI->labeled_text("Prompt debounce", "pending replans %d",
+            ptAppData->tFrame.iPromptDebouncePendingReplans);
 
         gptUI->end_window();
     }
@@ -913,6 +1009,8 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
         ptAppData->bShowRed = true;
         ptAppData->bFollowLastSpawn = true;
         ptAppData->bInferenceContinuityLock = false;
+        ptAppData->bSeamSmoothingMode = false;
+        ptAppData->bCharacterWrapperEnabled = true;
         pl__camera_orbit_from_angles(&ptAppData->tCamera, ptAppData->tOrbitTarget, ptAppData->fOrbitDist);
         return ptAppData;
     }
@@ -930,6 +1028,8 @@ pl_app_load(plApiRegistryI* ptApiRegistry, plAppData* ptAppData)
     ptAppData->bShowRed = true;
     ptAppData->bFollowLastSpawn = true;
     ptAppData->bInferenceContinuityLock = false;
+    ptAppData->bSeamSmoothingMode = false;
+    ptAppData->bCharacterWrapperEnabled = true;
 
     const plExtensionRegistryI* ptExtensionRegistry = pl_get_api_latest(ptApiRegistry, plExtensionRegistryI);
     ptExtensionRegistry->load("pl_unity_ext", NULL, NULL, true);

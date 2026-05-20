@@ -8,6 +8,16 @@
   limit_context: null # 30fps frames, if None - will not limit
   cfg_param: 1.
   context_switch_prob: 0.  # augmentation for training - randomly get the contexts form MDM instead of SIM; 0. == disabled 
+  transition_blend_frames: 8
+  inference_continuity_lock: False
+  inference_continuity_frames: 12
+
+  # A/B replan seam smoothing (runtime-toggle via PilotLight control).
+  seam_smoothing_mode: False
+  same_prompt_blend_frames: 4
+  full_body_continuity_blend: True
+  prompt_debounce_enabled: False
+  prompt_debounce_replans: 2
   traj_guidance: False  # For goal reaching
   
   # Recon guidance params

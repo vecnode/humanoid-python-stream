@@ -46,7 +46,7 @@ import torch
 import imageio
 from datetime import datetime
 from closd.utils.flags import flags
-from closd.utils.viewer_bridge import BridgeConfig, PilotLightStatePublisher, build_frame_payload
+from closd.utils.viewer_bridge import BridgeConfig, PilotLightStatePublisher, CharacterJointWrapper, build_frame_payload
 from collections import defaultdict
 import aiohttp, cv2, asyncio
 import json
@@ -69,6 +69,12 @@ class BaseTask():
         self._bridge_publish_every_n_steps = max(1, int(viewer_cfg.get("bridge_publish_every_n_steps", 1)))
         self._bridge_include_rot = bool(viewer_cfg.get("bridge_include_rot", True))
         self._bridge_include_predicted = bool(viewer_cfg.get("bridge_include_predicted", True))
+        self._bridge_character_wrapper_map = str(
+            viewer_cfg.get("bridge_character_wrapper_map", "assets/character3_smpl24_wrapper.json")
+        )
+        self._bridge_character_wrapper_enabled = bool(
+            viewer_cfg.get("bridge_character_wrapper_enabled", True)
+        )
         self._bridge_last_published_step = -1
         self._bridge_control_enabled = bool(viewer_cfg.get("bridge_control_enabled", self._bridge_enabled))
         self._bridge_control_host = str(viewer_cfg.get("bridge_control_host", "127.0.0.1"))
@@ -81,6 +87,10 @@ class BaseTask():
             enabled=(self.viewer_backend == "pilotlight" and self._bridge_enabled),
         )
         self._pilotlight_publisher = PilotLightStatePublisher(bridge_cfg)
+        self._character_wrapper = CharacterJointWrapper(
+            map_path=self._bridge_character_wrapper_map,
+            enabled=(self.viewer_backend == "pilotlight" and self._bridge_enabled and self._bridge_character_wrapper_enabled),
+        )
         self._init_pilotlight_control_socket()
 
         self.headless = cfg["headless"]
@@ -554,6 +564,9 @@ class BaseTask():
             extra_state = self.get_pilotlight_overlay_state(env_id)
             if isinstance(extra_state, dict):
                 payload.update(extra_state)
+
+        if hasattr(self, "_character_wrapper"):
+            self._character_wrapper.apply(payload)
 
         self._pilotlight_publisher.publish(payload)
         self._bridge_last_published_step = sim_frame

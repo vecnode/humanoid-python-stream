@@ -97,6 +97,7 @@ wait_for_tcp_ready() {
 BUILD_VIEWER=0
 KEEP_VIEWER=0
 DEBUG_HML=0
+AB_SMOOTHING=0
 CLOSD_ARGS=()
 
 VIEWER_STATUS="skipped"
@@ -116,6 +117,10 @@ while (($#)); do
       ;;
     --debug-hml)
       DEBUG_HML=1
+      shift
+      ;;
+    --ab-smoothing)
+      AB_SMOOTHING=1
       shift
       ;;
     *)
@@ -230,10 +235,27 @@ DEFAULT_ARGS=(
   "env.viewer.bridge_publish_every_n_steps=1"
   "env.viewer.bridge_include_rot=True"
   "env.viewer.bridge_include_predicted=True"
+  "env.viewer.bridge_character_wrapper_enabled=True"
+  "env.viewer.bridge_character_wrapper_map=assets/character3_smpl24_wrapper.json"
 )
 
 if [[ ${DEBUG_HML} -eq 1 ]]; then
   DEFAULT_ARGS+=("env.dip.debug_hml=True")
+fi
+
+if [[ ${AB_SMOOTHING} -eq 1 ]]; then
+  echo "[startup] enabling A/B smoothing profile"
+  DEFAULT_ARGS+=(
+    "env.dip.context_switch_prob=0.0"
+    "env.dip.transition_blend_frames=8"
+    "env.dip.inference_continuity_lock=True"
+    "env.dip.inference_continuity_frames=12"
+    "env.dip.seam_smoothing_mode=True"
+    "env.dip.same_prompt_blend_frames=4"
+    "env.dip.full_body_continuity_blend=True"
+    "env.dip.prompt_debounce_enabled=True"
+    "env.dip.prompt_debounce_replans=2"
+  )
 fi
 
 phase_end "prepare_closd"
