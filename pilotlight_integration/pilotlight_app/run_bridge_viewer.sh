@@ -1,8 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Run the PilotLight bridge viewer standalone
 # This starts the viewer binary if it exists
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INTEGRATION_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -16,4 +16,5 @@ if [ ! -f "$BINARY" ]; then
 fi
 
 echo "Starting PilotLight viewer: $BINARY"
+export LD_LIBRARY_PATH="$(dirname "$BINARY"):${LD_LIBRARY_PATH:-}"
 exec "$BINARY"

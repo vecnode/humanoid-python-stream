@@ -160,7 +160,7 @@ class BaseTask():
         self.create_viewer()
         if flags.server_mode:
             # bgsk = threading.Thread(target=self.setup_video_client, daemon=True).start()
-            bgsk = threading.Thread(target=self.setup_talk_client, daemon=False).start()
+            threading.Thread(target=self.setup_talk_client, daemon=False).start()
 
     def create_viewer(self):
         if self.headless == False and self.viewer_backend == "isaac":
@@ -212,7 +212,7 @@ class BaseTask():
         self.viewing_env_idx = 0
         for idx, env in enumerate(self.envs):
             self.recorder_camera_handles.append(self.gym.create_camera_sensor(env, gymapi.CameraProperties()))
-            if idx > self.max_num_camera:
+            if idx >= self.max_num_camera:
                 break
 
         self.recorder_camera_handle = self.recorder_camera_handles[0]
@@ -288,50 +288,47 @@ class BaseTask():
         loop = asyncio.new_event_loop()  # <-- create new loop in this thread here
         asyncio.set_event_loop(loop)
         loop.run_until_complete(self.talk())
-        loop.run_forever()
 
     #print(URL)
     async def talk(self):
         URL = 'http://klab-cereal.pc.cs.cmu.edu:8080/ws'
         print("Starting websocket client")
-        session = aiohttp.ClientSession()
-        async with session.ws_connect(URL) as ws:
-            async for msg in ws:
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    if msg.data == 'close cmd':
-                        await ws.close()
-                        break
-                    else:
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(URL) as ws:
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        if msg.data == 'close cmd':
+                            await ws.close()
+                            break
+
                         print(msg.data)
                         try:
-                            msg = json.loads(msg.data)
-                            if msg['action'] == 'reset':
+                            payload = json.loads(msg.data)
+                            if payload['action'] == 'reset':
                                 self.reset()
-                            elif msg['action'] == 'start_record':
+                            elif payload['action'] == 'start_record':
                                 if self.recording:
                                     print("Already recording")
                                 else:
                                     self.recording = True
                                     self.recording_state_change = True
-                            elif msg['action'] == 'end_record':
+                            elif payload['action'] == 'end_record':
                                 if not self.recording:
                                     print("Not recording")
                                 else:
                                     self.recording = False
                                     self.recording_state_change = True
-                            elif msg['action'] == 'set_env':
-                                query = msg['query']
+                            elif payload['action'] == 'set_env':
+                                query = payload['query']
                                 env_id = query['env']
                                 self.viewing_env_idx = int(env_id)
                                 print("view env idx: ", self.viewing_env_idx)
-                        except:
-                            import ipdb
-                            ipdb.set_trace()
-                            print("error parsing server message")
-                elif msg.type == aiohttp.WSMsgType.CLOSED:
-                    break
-                elif msg.type == aiohttp.WSMsgType.ERROR:
-                    break
+                        except (TypeError, ValueError, KeyError) as ex:
+                            print("error parsing server message: ", ex)
+                    elif msg.type == aiohttp.WSMsgType.CLOSED:
+                        break
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        break
 
     #print(URL)
     async def video_stream(self):
@@ -839,7 +836,8 @@ class BaseTask():
         for i in range(self.control_freq_inv):
             self.render()
 
-            if not self.paused and self.enable_viewer_sync:
+            # Keep simulation progressing even when viewer sync is disabled.
+            if not self.paused:
                 self.gym.simulate(self.sim)
         return
 
