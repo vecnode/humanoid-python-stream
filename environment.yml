@@ -1,8 +1,6 @@
 # Conda environment for mixed-motion (CLoSD + physics sim)
 #
 # Python 3.8 — required by IsaacGym (ships pre-compiled .so only for 3.6/3.7/3.8).
-# Audio (VibeVoice) runs in a SEPARATE process using .venv (Python 3.10+).
-# See audio_runtime/requirements_worker.txt for the audio venv setup.
 #
 # Create / recreate:
 #   conda env create -f environment.yml
@@ -40,7 +38,6 @@ dependencies:
     # ── Core ML / PyTorch ───────────────────────────────────────────────────
     - torch==2.2.2
     - torchvision==0.17.2
-    - torchaudio==2.2.2
     - triton==2.2.0
     - pytorch-lightning==2.3.3
     - torchmetrics==1.5.2
@@ -64,7 +61,6 @@ dependencies:
     - intel-openmp==2026.0.0
 
     # ── HuggingFace ─────────────────────────────────────────────────────────
-    # vibevoice runs in .venv-1 (Python 3.10+), NOT in this env.
     # This env only needs the HF libraries used by CLoSD/DiP (BERT encoder etc).
     - transformers==4.38.2
     - huggingface-hub==0.23.4

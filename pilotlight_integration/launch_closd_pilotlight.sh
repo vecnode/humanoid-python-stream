@@ -52,48 +52,6 @@ require_cmd() {
   fi
 }
 
-check_tcp_ready() {
-  local host="$1"
-  local port="$2"
-  python3 - "$host" "$port" <<'PY' >/dev/null 2>&1
-import socket
-import sys
-
-host = sys.argv[1]
-port = int(sys.argv[2])
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.settimeout(0.25)
-try:
-    s.connect((host, port))
-except Exception:
-    sys.exit(1)
-finally:
-    s.close()
-PY
-}
-
-wait_for_tcp_ready() {
-  local host="$1"
-  local port="$2"
-  local timeout_s="$3"
-  local pid="${4:-}"
-  local label="$5"
-  local deadline=$((SECONDS + timeout_s))
-
-  while (( SECONDS < deadline )); do
-    if check_tcp_ready "$host" "$port"; then
-      return 0
-    fi
-    if [[ -n "${pid}" ]] && ! kill -0 "${pid}" >/dev/null 2>&1; then
-      log_warn "${label} process exited before becoming ready"
-      return 2
-    fi
-    sleep 1
-  done
-
-  return 1
-}
-
 BUILD_VIEWER=0
 KEEP_VIEWER=0
 DEBUG_HML=0
@@ -101,9 +59,7 @@ AB_SMOOTHING=0
 CLOSD_ARGS=()
 
 VIEWER_STATUS="skipped"
-AUDIO_STATUS="skipped"
 CLOSD_STATUS="pending"
-AUDIO_READY_TIMEOUT="${AUDIO_READY_TIMEOUT:-90}"
 
 while (($#)); do
   case "$1" in
@@ -172,38 +128,10 @@ cleanup() {
   if [[ -n "${VIEWER_PID}" && ${KEEP_VIEWER} -eq 0 ]]; then
     kill "${VIEWER_PID}" >/dev/null 2>&1 || true
   fi
-  if [[ -n "${AUDIO_WORKER_PID:-}" ]]; then
-    kill "${AUDIO_WORKER_PID}" >/dev/null 2>&1 || true
-  fi
 }
 trap cleanup EXIT INT TERM
 
-# ── Audio worker (VibeVoice, Python 3.10+ / .venv) ─────────────────────────
-AUDIO_PYTHON="${ROOT_DIR}/.venv/bin/python"
-AUDIO_WORKER_PID=""
-if [[ -x "${AUDIO_PYTHON}" ]]; then
-  "${AUDIO_PYTHON}" -m audio_runtime.worker \
-    --model "microsoft/VibeVoice-Realtime-0.5B" \
-    --device "cuda:0" \
-    --output-dir "/tmp/mixed-motion-audio" \
-    > /tmp/audio_worker.log 2>&1 &
-  AUDIO_WORKER_PID=$!
-  echo "audio worker started pid=${AUDIO_WORKER_PID} log=/tmp/audio_worker.log"
-
-  if wait_for_tcp_ready "127.0.0.1" "45679" "${AUDIO_READY_TIMEOUT}" "${AUDIO_WORKER_PID}" "audio worker"; then
-    AUDIO_STATUS="ready"
-    echo "audio worker ready host=127.0.0.1 port=45679"
-  else
-    AUDIO_STATUS="degraded_optional"
-    log_warn "audio worker not ready within ${AUDIO_READY_TIMEOUT}s; continuing without guaranteed audio"
-  fi
-else
-  echo "audio worker skipped (.venv not found — see audio_runtime/requirements_worker.txt)"
-  AUDIO_STATUS="missing_optional"
-fi
-phase_end "audio_launch"
-
-echo "[startup] health summary: preflight=ok viewer=${VIEWER_STATUS} audio=${AUDIO_STATUS}"
+echo "[startup] health summary: preflight=ok viewer=${VIEWER_STATUS}"
 
 if [[ -n "${CONDA_PREFIX:-}" && -d "${CONDA_PREFIX}/lib" ]]; then
   export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
@@ -276,6 +204,6 @@ phase_end "closd_runtime"
 
 TOTAL_ELAPSED=$(( $(date +%s) - START_TS ))
 echo "[startup] phase timings: ${PHASE_ROWS[*]}"
-echo "[startup] final health: preflight=ok viewer=${VIEWER_STATUS} audio=${AUDIO_STATUS} closd=${CLOSD_STATUS} total=${TOTAL_ELAPSED}s"
+echo "[startup] final health: preflight=ok viewer=${VIEWER_STATUS} closd=${CLOSD_STATUS} total=${TOTAL_ELAPSED}s"
 
 exit ${CLOSD_EXIT}

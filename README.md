@@ -47,14 +47,11 @@ This project expects these folders at the root level:
 
 ## First Install
 
-Two environments are required because IsaacGym ships pre-compiled binaries **only for Python 3.6–3.8**, while VibeVoice requires **Python ≥ 3.10**. They cannot share one interpreter.
+IsaacGym ships pre-compiled binaries **only for Python 3.6–3.8**, so this project is configured around Python 3.8.
 
 | Environment | Python | Purpose |
 |---|---|---|
 | `conda closd` | **3.8** | IsaacGym · CLoSD · DiP · RL policy · SMPL · BERT |
-| `.venv` | **3.10+** | VibeVoice audio worker (separate process) |
-
-The launch script starts both automatically. Only `closd` needs to be active when you run it.
 
 ### 1. Create the conda environment (Python 3.8 — sim + all models)
 
@@ -84,19 +81,6 @@ pip install "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.9"
 # CLIP:
 pip install git+https://github.com/openai/CLIP.git
 ```
-
-### 2. Create the audio venv (Python 3.10+ — VibeVoice only)
-
-```bash
-conda deactivate
-python3.10 -m venv .venv
-.venv/bin/pip install -r audio_runtime/requirements_worker.txt
-
-# Optional — enables vibevoice's fast CUDA path (requires CUDA headers):
-.venv/bin/pip install flash-attn --no-build-isolation
-```
-
-The launch script detects `.venv/bin/python` automatically. If the venv is absent, the system runs without audio and logs a skip message.
 
 
 
@@ -172,14 +156,6 @@ flowchart LR
                 X -.->|body model| Xm
         end
 
-        subgraph V[Voice Synthesis]
-                direction TB
-                VV[Real-time TTS<br/>pose + phase → speech]
-                VVm["microsoft/VibeVoice-Realtime-0.5B"]:::model
-                AU([Audio Out<br/>streamed PCM])
-                VV -.->|weights| VVm
-        end
-
         subgraph A[PilotLight App]
                 direction TB
                 B[IPC Bridge<br/>shared-memory · debug channels]
@@ -188,7 +164,6 @@ flowchart LR
 
         P --> E --> D --> R --> X
         X --> B --> G
-        X -- pose + phase context --> VV --> AU
         X -. state feedback .-> D
         G -- user observes · next prompt --> P
 
@@ -285,49 +260,7 @@ flowchart LR
         O --> A
 
         D --> O4[Outputs to global runtime<br/>rigid body state and simulation dt]
-        D --> O5[Output to audio graph<br/>text trigger path via runtime client]
 ```
 
 This closes the tracking loop: planner predictions become reference motion, and the RL controller is rewarded for matching body position and velocity while maintaining stable simulation.
-
-### Audio Runtime 
-
-Audio is intentionally split into two Python processes: CLoSD (3.8) remains in the simulation environment, while a dedicated worker (.venv, 3.10+) owns VibeVoice and serves synthesis over localhost TCP.
-
-```mermaid
-flowchart LR
-        I3[Inputs from runtime graphs<br/>text command and worker endpoint] --> L
-        subgraph S[Launcher]
-                L[launch_closd_pilotlight.sh]
-        end
-
-        subgraph C[CLoSD Process - Python 3.8]
-                R[initialize_audio_runtime]
-                RT[AudioRuntime client]
-        end
-
-        subgraph W[Audio Worker - Python 3.10+]
-                WS[AudioWorkerServer<br/>TCP 127.0.0.1:45679]
-                M[VibeVoice model + processor]
-                SY[Synthesize text job]
-                WAV[Wave file output in tmp directory]
-        end
-
-        L -->|spawn .venv/bin/python -m audio_runtime.worker| WS
-        L -->|wait_for_tcp_ready| WS
-        C -->|startup| R -->|ping| WS
-        WS -->|pong ready=true| RT
-        RT -->|synthesize text cmd| WS
-        WS --> M --> SY --> WAV
-
-        WAV --> O6[Audio output contract<br/>wave files available for playback]
-        RT --> O7[Runtime status output<br/>ready or degraded optional]
-```
-
-Current behavior is text-driven synthesis over the socket protocol (`ping`, `synthesize`, `shutdown`). Pose/phase arguments are accepted by the CLoSD-side API for forward compatibility, but are not yet streamed to the worker.
-
-
-VibeVoice-Realtime is a lightweight real‑time text-to-speech model supporting streaming text input and robust long-form speech generation. It can be used to build realtime TTS services, narrate live data streams, and let different LLMs start speaking from their very first tokens (plug in your preferred model) long before a full answer is generated. It produces initial audible speech in ~300 ms (hardware dependent).
-
-https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B
 
